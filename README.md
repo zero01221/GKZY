@@ -163,8 +163,8 @@ tools\setup-runtime.bat
 ├─ server\             本地服务（静态托管 + 数据 API + 推荐引擎）
 ├─ web\                前端页面
 └─ data\
-   ├─ schools.json     院校库
-   ├─ colleges.json    大学环境数据
+   ├─ schools.json.gz   院校库（2991 所，压缩存放）
+   ├─ colleges.json.gz  大学环境数据（4585 所，压缩存放）
    ├─ index\           分数线索引（按省-年）
    └─ cache\           查询缓存（可随时删除）
 ```
@@ -197,6 +197,20 @@ node tools/build_bundle.mjs
 # 查看抓取进度
 node tools/crawl.mjs status
 ```
+
+### 自动化测试
+
+```bash
+node tools/api-test.mjs      # 后端验收：24 项（三大功能 + 边界场景）
+node tools/render-test.mjs   # 前端渲染回归：16 项（在假 DOM 中真实执行 app.js）
+```
+
+两个脚本都会自己拉起本地服务、跑完自动关闭，无需手工准备环境。
+
+> `render-test.mjs` 的价值：`node --check` 只能查语法，查不出
+> 「模板里引用了未声明的变量」这类只有运行期才暴露的错误。
+> 它会在假 DOM 中真实调用 `renderScoreResult` / `showCampus` / `renderRecommend`
+> 等全部渲染函数，并断言产出里不含 `undefined` / `NaN`。
 
 **架构要点**
 

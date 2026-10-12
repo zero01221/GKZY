@@ -325,8 +325,8 @@ async function showCampus(name) {
       </div>
       <div class="hint">以下内容为在校生匿名问卷回答的聚合，同一问题按回答频次排序。</div>
     </div>
-    ${g.length ? `<div class="card"><h2 class="h2">住宿与生活（${g.length} 个问题）</h2><div style="margin-top:10px">
-      ${g.map((x) => `<details class="qgroup" ${['宿舍','教室'].some((k) => x.q.includes(k)) ? 'open' : ''}>
+    ${groups.length ? `<div class="card"><h2 class="h2">住宿与生活（${groups.length} 个问题）</h2><div style="margin-top:10px">
+      ${groups.map((x) => `<details class="qgroup" ${['宿舍', '教室'].some((k) => x.q.includes(k)) ? 'open' : ''}>
         <summary>${esc(x.q)}</summary>
         <div class="answers">${x.items.map(([a, c]) => `<div class="ans"><span class="cnt">${c}</span><span>${esc(a)}</span></div>`).join('')}</div>
       </details>`).join('')}</div></div>` : ''}
