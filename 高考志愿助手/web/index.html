@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>高考志愿助手 · 分数线 / 大学环境 / 冲稳保推荐</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <div class="brand">
+      <span class="logo">🎓</span>
+      <div>
+        <h1>高考志愿助手</h1>
+        <p class="sub">分数线查询 · 大学环境 · 冲稳保推荐</p>
+      </div>
+    </div>
+    <nav class="tabs" id="tabs">
+      <button class="tab active" data-tab="score">分数线查询</button>
+      <button class="tab" data-tab="campus">大学环境</button>
+      <button class="tab" data-tab="recommend">智能推荐</button>
+      <button class="tab" data-tab="wishlist">我的志愿</button>
+      <button class="tab" data-tab="data">数据管理</button>
+    </nav>
+  </div>
+</header>
+
+<div class="notice wrap">
+  <b>免责声明：</b>本工具为个人学习项目，数据来自公开渠道，可能存在滞后或误差；
+  「冲稳保」与录取概率均为基于历史数据的统计推算，<b>不构成志愿填报建议</b>，最终请以各省教育考试院与高校官方发布为准。
+</div>
+
+<main class="wrap">
+
+  <!-- ============ 1. 分数线查询 ============ -->
+  <section id="panel-score" class="panel active">
+    <div class="card">
+      <div class="filters">
+        <label>生源省份
+          <select id="s-province"></select>
+        </label>
+        <label>科类
+          <select id="s-type"><option value="">全部</option></select>
+        </label>
+        <label>年份
+          <select id="s-year"><option value="">全部</option></select>
+        </label>
+        <label class="grow">院校
+          <input id="s-school" list="school-list" placeholder="输入院校名称，如：中山大学">
+          <datalist id="school-list"></datalist>
+        </label>
+        <label class="grow">专业关键词（可选）
+          <input id="s-major" placeholder="如：计算机、临床医学">
+        </label>
+        <button class="btn primary" id="s-search">查询</button>
+      </div>
+      <div class="hint" id="s-hint">提示：先选生源省份与院校，再点查询。数据优先使用本地索引，缺失时自动联网获取。</div>
+    </div>
+
+    <div id="s-result"></div>
+  </section>
+
+  <!-- ============ 2. 大学环境 ============ -->
+  <section id="panel-campus" class="panel">
+    <div class="card">
+      <div class="filters">
+        <label class="grow">搜索院校
+          <input id="c-q" placeholder="输入院校名称，如：武汉大学">
+        </label>
+        <button class="btn primary" id="c-search">搜索</button>
+        <a class="btn ghost" href="https://cn.colleges.chat/" target="_blank" rel="noopener">前往 colleges.chat ↗</a>
+      </div>
+      <div class="hint">
+        数据来自开源项目 <b>colleges.chat（大学生活质量指北）</b>，来源为在校生问卷。
+        内容未经校方核实，请结合自身情况判断。
+      </div>
+    </div>
+    <div id="c-result"></div>
+  </section>
+
+  <!-- ============ 3. 智能推荐 ============ -->
+  <section id="panel-recommend" class="panel">
+    <div class="card">
+      <div class="filters">
+        <label>生源省份
+          <select id="r-province"></select>
+        </label>
+        <label>科类
+          <select id="r-type"><option value="">请选择</option></select>
+        </label>
+        <label>定位方式
+          <select id="r-mode">
+            <option value="score">按分数</option>
+            <option value="rank">按位次</option>
+          </select>
+        </label>
+        <label id="r-score-wrap">高考分数
+          <input id="r-score" type="number" min="0" max="750" placeholder="如：600">
+        </label>
+        <label id="r-rank-wrap" style="display:none">全省位次
+          <input id="r-rank" type="number" min="1" placeholder="如：25000">
+        </label>
+        <label class="grow">意向专业（可选）
+          <input id="r-major" placeholder="如：计算机科学与技术">
+        </label>
+        <button class="btn primary" id="r-run">开始推荐</button>
+      </div>
+      <div class="hint">
+        采用<b>位次法</b>：由分数估算全省位次，与各院校专业组近三年录取位次比较，
+        用正态模型估算录取概率（冲 &lt; 45% ≤ 稳 &lt; 80% ≤ 保）。
+      </div>
+    </div>
+    <div id="r-result"></div>
+  </section>
+
+  <!-- ============ 4. 我的志愿 ============ -->
+  <section id="panel-wishlist" class="panel">
+    <div class="card">
+      <div class="filters">
+        <h2 class="h2">我的志愿表 <span class="pill" id="w-count">0</span></h2>
+        <div class="spacer"></div>
+        <button class="btn" id="w-export">导出 CSV</button>
+        <button class="btn" id="w-print">打印</button>
+        <button class="btn danger" id="w-clear">清空</button>
+      </div>
+      <div class="hint">在「分数线查询」或「智能推荐」结果中点击 ☆ 即可加入志愿表，数据保存在本机浏览器中。</div>
+    </div>
+    <div id="w-result"></div>
+  </section>
+
+  <!-- ============ 5. 数据管理 ============ -->
+  <section id="panel-data" class="panel">
+    <div class="card">
+      <div class="filters">
+        <label>按省份同步
+          <select id="d-province"></select>
+        </label>
+        <label>年份
+          <input id="d-year" type="number" min="2020" max="2030" placeholder="默认今年">
+        </label>
+        <button class="btn primary" id="d-sync-one">同步该省份</button>
+        <button class="btn" id="d-sync-all">补齐最近三年全部省份</button>
+        <div class="spacer"></div>
+        <button class="btn" id="d-refresh">刷新状态</button>
+      </div>
+      <div class="hint">
+        本工具<b>默认不会自动抓取</b>（避免给你的网络带来限流），缺少的省份可在此按需同步。
+        同步在后台限速进行，<b>不影响你继续使用页面</b>；抓完一个省约需 10–40 分钟，可随时关闭程序，下次会从断点继续。
+      </div>
+    </div>
+    <div id="d-result"></div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <div class="wrap">
+    高考志愿助手 · 本地离线运行 ·
+    数据来源：<a href="https://www.gaokao.cn/" target="_blank" rel="noopener">掌上高考</a> /
+    <a href="https://cn.colleges.chat/" target="_blank" rel="noopener">colleges.chat</a> ·
+    仅供学习参考，请以官方发布为准
+  </div>
+</footer>
+
+<div id="toast" class="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>

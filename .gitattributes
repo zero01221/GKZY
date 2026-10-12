@@ -1,0 +1,27 @@
+# 默认按文本处理并统一为 LF
+* text=auto
+
+# 源码
+*.mjs   text eol=lf
+*.js    text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+
+# Windows 批处理必须使用 CRLF，否则可能出现奇怪问题
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# 二进制文件不做换行转换
+*.gz    binary
+*.exe   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.webp  binary
+*.ico   binary
+
+# 让 GitHub 正确识别语言
+*.mjs   linguist-language=JavaScript
