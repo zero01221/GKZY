@@ -14,13 +14,16 @@
       <span class="logo">🎓</span>
       <div>
         <h1>高考志愿助手</h1>
-        <p class="sub">分数线查询 · 大学环境 · 冲稳保推荐</p>
+        <p class="sub">智能推荐 · 完整志愿方案 · 一分一段 · 大学环境 · AI 助手</p>
       </div>
     </div>
     <nav class="tabs" id="tabs">
-      <button class="tab active" data-tab="score">分数线查询</button>
-      <button class="tab" data-tab="campus">大学环境</button>
+      <button class="tab active" data-tab="plan">志愿方案</button>
       <button class="tab" data-tab="recommend">智能推荐</button>
+      <button class="tab" data-tab="score">分数线查询</button>
+      <button class="tab" data-tab="resource">资料库</button>
+      <button class="tab" data-tab="campus">大学环境</button>
+      <button class="tab" data-tab="ai">AI 助手</button>
       <button class="tab" data-tab="wishlist">我的志愿</button>
       <button class="tab" data-tab="data">数据管理</button>
     </nav>
@@ -28,14 +31,57 @@
 </header>
 
 <div class="notice wrap">
-  <b>免责声明：</b>本工具为个人学习项目，数据来自公开渠道，可能存在滞后或误差；
+  <b>免责声明：</b>本工具为个人学习项目，数据来自公开渠道（掌上高考 / 中国教育在线 / colleges.chat），可能存在滞后或误差；
   「冲稳保」与录取概率均为基于历史数据的统计推算，<b>不构成志愿填报建议</b>，最终请以各省教育考试院与高校官方发布为准。
 </div>
 
 <main class="wrap">
 
+  <!-- ============ 0. 志愿方案（完整 80 条） ============ -->
+  <section id="panel-plan" class="panel active">
+    <div class="card">
+      <div class="filters">
+        <label>生源省份 <select id="p-province"></select></label>
+        <label>科类 <select id="p-type"><option value="">请选择</option></select></label>
+        <label>定位方式
+          <select id="p-mode">
+            <option value="score">按分数</option>
+            <option value="rank">按位次</option>
+          </select>
+        </label>
+        <label id="p-score-wrap">高考分数 <input id="p-score" type="number" min="0" max="750" placeholder="如：600"></label>
+        <label id="p-rank-wrap" style="display:none">全省位次 <input id="p-rank" type="number" min="1" placeholder="如：30000"></label>
+        <label class="grow">意向专业（可选） <input id="p-major" placeholder="如：计算机、临床医学"></label>
+      </div>
+      <div class="filters" style="margin-top:10px">
+        <label style="min-width:auto">选科（可多选）
+          <div class="chips" id="p-subjects"></div>
+        </label>
+      </div>
+      <div class="filters" style="margin-top:10px">
+        <label>填报策略
+          <select id="p-strategy">
+            <option value="school">院校优先（冲好学校，每校 1 个专业组）</option>
+            <option value="major">专业优先（锁定意向专业，同校可多个）</option>
+          </select>
+        </label>
+        <label>方案条数 <input id="p-total" type="number" min="10" max="112" value="80"></label>
+        <label>冲 : 稳 : 保
+          <input id="p-ratios" value="30:40:30" style="width:120px" placeholder="30:40:30">
+        </label>
+        <button class="btn primary" id="p-run">一键生成志愿方案</button>
+        <button class="btn" id="p-clear">清空</button>
+      </div>
+      <div class="hint">
+        采用<b>位次法</b>：优先用该省<b>真实一分一段表</b>把你的分数换算成位次，再与各招生单元近三年位次比较，估算录取概率。
+        「冲」= 往年门槛略高于你，「稳」= 与你相当，「保」= 明显低于你。生成后可自由调整顺序、增删条目，再导出。
+      </div>
+    </div>
+    <div id="p-result"></div>
+  </section>
+
   <!-- ============ 1. 分数线查询 ============ -->
-  <section id="panel-score" class="panel active">
+  <section id="panel-score" class="panel">
     <div class="card">
       <div class="filters">
         <label>生源省份
@@ -130,7 +176,101 @@
     <div id="w-result"></div>
   </section>
 
-  <!-- ============ 5. 数据管理 ============ -->
+  <!-- ============ 5. 资料库 ============ -->
+  <section id="panel-resource" class="panel">
+    <div class="card">
+      <div class="filters" style="align-items:center">
+        <h2 class="h2">资料库</h2>
+        <div class="spacer"></div>
+        <div class="seg" id="res-tabs">
+          <button class="seg-btn active" data-seg="rank">一分一段表</button>
+          <button class="seg-btn" data-seg="code">院校 / 专业代码</button>
+        </div>
+      </div>
+      <div class="hint" id="res-hint"></div>
+    </div>
+
+    <!-- 一分一段 -->
+    <div id="res-rank">
+      <div class="card">
+        <div class="filters">
+          <label>省份 <select id="rk-province"></select></label>
+          <label>年份 <select id="rk-year"></select></label>
+          <label>科类 <select id="rk-type"></select></label>
+          <label class="grow">分数查位次 <input id="rk-score" type="number" min="0" max="750" placeholder="输入分数，如 600"></label>
+          <button class="btn primary" id="rk-query">查位次</button>
+          <button class="btn" id="rk-table">查看完整表格</button>
+        </div>
+        <div class="hint">
+          数据来自中国教育在线转载的<b>各省官方一分一段表</b>，已归一化为「分数 / 本段人数 / 累计人数」。
+          少数省份官方以图片形式发布，本工具会如实标注并给出原文链接，不做任何估算填充。
+        </div>
+      </div>
+      <div id="rk-result"></div>
+    </div>
+
+    <!-- 代码 -->
+    <div id="res-code" style="display:none">
+      <div class="card">
+        <div class="filters">
+          <label class="grow">院校 <input id="cd-school" list="school-list2" placeholder="输入院校名称，如：中山大学"><datalist id="school-list2"></datalist></label>
+          <label>生源省份 <select id="cd-province"></select></label>
+          <label>年份 <input id="cd-year" type="number" min="2020" max="2030" placeholder="默认今年"></label>
+          <button class="btn primary" id="cd-query">查询代码</button>
+        </div>
+        <div class="hint">
+          <b>院校代码</b>取教育部国标代码（5 位，与掌上高考一致）；
+          <b>专业代码</b>含两类：教育部专业（类）代码（如 100201K）与<b>各省招生专业目录里的省编专业代码</b>（如 089）。
+          代码会随各省招生计划调整，填报前请以本省当年《招生专业目录》为准。
+        </div>
+      </div>
+      <div id="cd-result"></div>
+    </div>
+  </section>
+
+  <!-- ============ 6. AI 助手 ============ -->
+  <section id="panel-ai" class="panel">
+    <div class="card">
+      <div class="filters" style="align-items:center">
+        <h2 class="h2">AI 志愿顾问</h2>
+        <span class="pill" id="ai-skill-badge">技能加载中…</span>
+        <div class="spacer"></div>
+        <button class="btn sm" id="ai-settings-toggle">API 设置</button>
+        <button class="btn sm" id="ai-extract">把对话结论转成志愿建议</button>
+        <button class="btn sm" id="ai-clear">清空对话</button>
+      </div>
+      <div id="ai-settings" class="aisettings" style="display:none">
+        <div class="filters">
+          <label class="grow">API 地址 <input id="ai-base" placeholder="https://api.deepseek.com/v1"></label>
+          <label class="grow">API Key <input id="ai-key" type="password" placeholder="sk-...（仅保存在本机浏览器）"></label>
+          <label>模型 <input id="ai-model" placeholder="deepseek-chat"></label>
+          <button class="btn primary" id="ai-save">保存</button>
+        </div>
+        <div class="hint">
+          兼容所有 OpenAI 格式接口：DeepSeek / OpenAI / Moonshot / 通义 / 智谱 / 本地 Ollama 等。
+          地址填到 <code>/v1</code> 为止（本工具会自动补 <code>/chat/completions</code>）。
+          Key <b>只保存在你自己的浏览器里</b>，通过本机服务转发，不写入磁盘、不上传别处。
+        </div>
+      </div>
+      <div class="hint">
+        内嵌开源技能 <a href="https://github.com/alchaincyf/zhangxuefeng-skill" target="_blank" rel="noopener">张雪峰 · 思维操作系统</a>（MIT），
+        结合你的省份/分数/选科做多轮追问式分析。聊完后点「把对话结论转成志愿建议」，可直接落到具体学校 + 专业。
+      </div>
+    </div>
+    <div class="card ai-chat-card">
+      <div id="ai-messages" class="ai-messages"></div>
+      <div class="ai-input">
+        <textarea id="ai-input" rows="2" placeholder="例如：广东物理类 600 分，想学计算机，家里希望留在省内，怎么填？"></textarea>
+        <button class="btn primary" id="ai-send">发送</button>
+      </div>
+      <div class="hint">
+        提示：先在「志愿方案」页生成一次方案，AI 会自动带上你的省份、分数、选科与意向专业作为上下文。
+      </div>
+    </div>
+    <div id="ai-result"></div>
+  </section>
+
+  <!-- ============ 7. 数据管理 ============ -->
   <section id="panel-data" class="panel">
     <div class="card">
       <div class="filters">
@@ -166,5 +306,6 @@
 
 <div id="toast" class="toast"></div>
 <script src="app.js"></script>
+<script src="plan-ui.js"></script>
 </body>
 </html>

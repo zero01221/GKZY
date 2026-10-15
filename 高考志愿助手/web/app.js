@@ -63,20 +63,24 @@ async function init() {
   } catch (e) { toast('加载基础信息失败：' + e.message); }
 
   const provOpts = (S.meta?.provinces || []).map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
-  $('#s-province').innerHTML = '<option value="">请选择</option>' + provOpts;
-  $('#r-province').innerHTML = '<option value="">请选择</option>' + provOpts;
-  $('#d-province').innerHTML = '<option value="">请选择</option>' + provOpts;
+  for (const id of ['s-province', 'r-province', 'd-province', 'p-province', 'cd-province']) {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = '<option value="">请选择</option>' + provOpts;
+  }
 
   // 默认省份：广东（若存在）
-  for (const sel of ['#s-province', '#r-province']) {
+  for (const sel of ['#s-province', '#r-province', '#p-province', '#cd-province']) {
     const el = $(sel);
-    if ([...el.options].some((o) => o.value === '44')) el.value = '44';
+    if (el && [...el.options].some((o) => o.value === '44')) el.value = '44';
   }
 
   await refreshDict('s');
   await refreshDict('r');
+  await refreshDict('p');
   bindEvents();
   renderWishlist();
+  // 通知扩展模块（志愿方案 / 资料库 / AI）可以初始化了
+  document.dispatchEvent(new CustomEvent('app-ready'));
 }
 
 async function refreshDict(prefix) {
@@ -85,9 +89,10 @@ async function refreshDict(prefix) {
   const typeSel = $(`#${prefix}-type`);
   const cur = typeSel.value;
   const types = d.types?.length ? d.types : (S.meta?.types || []);
-  typeSel.innerHTML = (prefix === 'r' ? '<option value="">请选择</option>' : '<option value="">全部</option>')
+  typeSel.innerHTML = (prefix === 's' ? '<option value="">全部</option>' : '<option value="">请选择</option>')
     + types.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join('');
   if ([...typeSel.options].some((o) => o.value === cur)) typeSel.value = cur;
+  else if (prefix !== 's' && types.length) typeSel.value = types[0];
 
   if (prefix === 's') {
     const ySel = $('#s-year');

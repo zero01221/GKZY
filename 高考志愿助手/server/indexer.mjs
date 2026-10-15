@@ -7,8 +7,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   PROVINCES, PROVINCE_NAME, INDEX_DIR, indexFile, compactProvinceRecords, saveProvinceIndex, loadProvinceIndex,
+  specialIndexFile, compactSpecialRecords, saveSpecialIndex,
 } from './data.mjs';
 import { apiFetch, upstreamStatus, userBusy } from './upstream.mjs';
+
+const KIND_URI = {
+  province: 'apidata/api/gk/score/province',
+  special: 'apidata/api/gk/score/special',
+};
+const KIND_LABEL = { province: '专业组投档线', special: '专业分数线' };
 
 const state = {
   running: false,
@@ -31,7 +38,7 @@ export function indexerStatus() {
     running: state.running,
     resting: state.resting,
     current: state.current,
-    queue: state.queue.map((j) => ({ province: PROVINCE_NAME.get(j.pid) || j.pid, year: j.year, priority: j.priority })),
+    queue: state.queue.map((j) => ({ province: PROVINCE_NAME.get(j.pid) || j.pid, year: j.year, priority: j.priority, kind: j.kind, kindLabel: KIND_LABEL[j.kind] || j.kind })),
     queueLen: state.queue.length,
     doneCount: state.done.length,
     recentDone: state.done.slice(-12),
@@ -40,14 +47,14 @@ export function indexerStatus() {
   };
 }
 
-export function enqueue(pid, year, priority = 5) {
+export function enqueue(pid, year, priority = 5, kind = 'province') {
   pid = Number(pid); year = Number(year);
   if (!PROVINCE_NAME.has(pid) || !year) return false;
-  const f = indexFile(pid, year);
+  const f = kind === 'special' ? specialIndexFile(pid, year) : indexFile(pid, year);
   if (fs.existsSync(f)) return false;
-  if (state.current && state.current.pid === pid && state.current.year === year) return false;
-  if (state.queue.some((j) => j.pid === pid && j.year === year)) return false;
-  state.queue.push({ pid, year, priority });
+  if (state.current && state.current.pid === pid && state.current.year === year && state.current.kind === kind) return false;
+  if (state.queue.some((j) => j.pid === pid && j.year === year && j.kind === kind)) return false;
+  state.queue.push({ pid, year, priority, kind });
   state.queue.sort((a, b) => a.priority - b.priority || b.year - a.year);
   return true;
 }
@@ -60,7 +67,8 @@ export function enqueueMany(list, priority = 5) {
 
 async function runJob(job) {
   const pname = PROVINCE_NAME.get(job.pid);
-  const partFile = path.join(INDEX_DIR, `.part_${job.pid}_${job.year}.json`);
+  const kind = job.kind || 'province';
+  const partFile = path.join(INDEX_DIR, `.part_${kind}_${job.pid}_${job.year}.json`);
   let resumeFrom = 1;
   let items = [];
   let numFound = null;
@@ -73,25 +81,29 @@ async function runJob(job) {
     } catch { /* 忽略损坏的断点文件 */ }
   }
   state.current = {
-    pid: job.pid, year: job.year, province: pname,
+    pid: job.pid, year: job.year, province: pname, kind, kindLabel: KIND_LABEL[kind],
     fetched: items.length, total: numFound ?? 0, startedAt: Date.now(), resumed: resumeFrom > 1,
   };
   try {
     const r = await fetchAllStreaming(
-      'apidata/api/gk/score/province',
+      KIND_URI[kind],
       { local_province_id: job.pid, year: job.year },
       { partFile, startPage: resumeFrom, items, numFound },
     );
     if (!r.items.length) {
-      state.errors.push({ province: pname, year: job.year, message: '无数据或抓取失败' });
+      state.errors.push({ province: pname, year: job.year, kind, message: '无数据或抓取失败' });
     } else {
-      const compact = { pid: job.pid, province: pname, year: job.year, numFound: r.numFound, complete: r.complete, ...compactProvinceRecords(r.items) };
-      saveProvinceIndex(job.pid, job.year, compact);
-      state.done.push({ province: pname, year: job.year, rows: compact.rows.length, complete: r.complete, at: Date.now() });
-      if (r.complete || r.items.length) { try { fs.unlinkSync(partFile); } catch { /* ignore */ } }
+      const base = { pid: job.pid, province: pname, year: job.year, numFound: r.numFound, complete: r.complete };
+      const compact = kind === 'special'
+        ? { ...base, ...compactSpecialRecords(r.items) }
+        : { ...base, ...compactProvinceRecords(r.items) };
+      if (kind === 'special') saveSpecialIndex(job.pid, job.year, compact);
+      else saveProvinceIndex(job.pid, job.year, compact);
+      state.done.push({ province: pname, year: job.year, kind, kindLabel: KIND_LABEL[kind], rows: compact.rows.length, complete: r.complete, at: Date.now() });
+      try { fs.unlinkSync(partFile); } catch { /* ignore */ }
     }
   } catch (e) {
-    state.errors.push({ province: pname, year: job.year, message: e.message });
+    state.errors.push({ province: pname, year: job.year, kind, message: e.message });
   } finally {
     state.current = null;
   }
@@ -169,13 +181,14 @@ export function autoBootstrap(years = [], { all = false } = {}) {
 export function coverage() {
   const out = {};
   for (const f of fs.readdirSync(INDEX_DIR)) {
-    const m = /^province_(\d+)_(\d+)\.json$/.exec(f);
+    const m = /^(province|special)_(\d+)_(\d+)\.json$/.exec(f);
     if (!m) continue;
-    const pid = Number(m[1]), year = Number(m[2]);
+    const kind = m[1], year = Number(m[3]);
     let rows = 0, complete = false;
     try { const d = JSON.parse(fs.readFileSync(path.join(INDEX_DIR, f), 'utf8')); rows = d.rows?.length || 0; complete = !!d.complete; } catch { /* ignore */ }
-    out[year] = out[year] || { provinces: 0, rows: 0, complete: 0, total: 31 };
-    out[year].provinces++; out[year].rows += rows; if (complete) out[year].complete++;
+    out[year] = out[year] || { provinces: 0, rows: 0, complete: 0, total: 31, specialProvinces: 0, specialRows: 0 };
+    if (kind === 'province') { out[year].provinces++; out[year].rows += rows; if (complete) out[year].complete++; }
+    else { out[year].specialProvinces++; out[year].specialRows += rows; }
   }
   return out;
 }
@@ -184,13 +197,13 @@ export function coverage() {
  * 快速抽样建索引：只抓前 N 页（约 N×20 条），让推荐功能在约 1 分钟内可用。
  * 标记 sampled=true，后台完整同步完成后会被覆盖。
  */
-export async function quickIndex(pid, year, pages = 30) {
-  const f = indexFile(pid, year);
+export async function quickIndex(pid, year, pages = 30, kind = 'province') {
+  const f = kind === 'special' ? specialIndexFile(pid, year) : indexFile(pid, year);
   if (fs.existsSync(f)) return { ok: true, existed: true };
   const items = [];
   let numFound = null;
   for (let page = 1; page <= pages; page++) {
-    const j = await apiFetch('apidata/api/gk/score/province',
+    const j = await apiFetch(KIND_URI[kind],
       { local_province_id: pid, year, page, size: 20 }, { user: true, retries: 3 });
     if (j.code !== '0000') break;
     const got = j.data?.item || [];
@@ -200,11 +213,11 @@ export async function quickIndex(pid, year, pages = 30) {
     if (numFound !== null && items.length >= Math.min(numFound, 10000)) break;
   }
   if (!items.length) return { ok: false, reason: '上游未返回数据（可能被限流）' };
-  const compact = {
-    pid, province: PROVINCE_NAME.get(pid), year, numFound,
-    complete: false, sampled: true,
-    ...compactProvinceRecords(items),
-  };
-  saveProvinceIndex(pid, year, compact);
-  return { ok: true, rows: compact.rows.length, numFound, sampled: true };
+  const base = { pid, province: PROVINCE_NAME.get(pid), year, numFound, complete: false, sampled: true };
+  const compact = kind === 'special'
+    ? { ...base, ...compactSpecialRecords(items) }
+    : { ...base, ...compactProvinceRecords(items) };
+  if (kind === 'special') saveSpecialIndex(pid, year, compact);
+  else saveProvinceIndex(pid, year, compact);
+  return { ok: true, kind, rows: compact.rows.length, numFound, sampled: true };
 }

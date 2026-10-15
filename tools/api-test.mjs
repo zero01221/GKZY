@@ -85,6 +85,81 @@ async function startServer() {
     const recMajor = await j('/api/recommend?provinceId=11&type=' + encodeURIComponent('综合') + '&score=650&limit=9&major=' + encodeURIComponent('计算机'));
     check('带专业匹配', recMajor.ok, recMajor.majorMatches ? `${recMajor.majorMatches.list?.length || 0} 条专业记录` : '无');
 
+    // ================= 资料库 =================
+    head('F4 · 资料库（一分一段表 · 真实数据）');
+    const rs = await j('/api/resource/status');
+    check('资料库已加载', rs.ok && rs.tables > 0, `${rs.tables} 张表 / ${rs.provinces} 个省 / ${rs.imageOnly} 条图片版`);
+    check('来源标注', /eol\.cn|教育在线/.test(rs.source || ''), rs.source);
+
+    const rlist = await j('/api/resource/rank/list');
+    check('表清单', Array.isArray(rlist.tables) && rlist.tables.length > 0, `${rlist.tables.length} 组`);
+    check('图片发布也如实列出', Array.isArray(rlist.imageOnly), `${rlist.imageOnly?.length || 0} 条`);
+
+    // 广东 2026 物理类 600 分 —— 用真实一分一段表核对
+    const rk = await j('/api/resource/rank?provinceId=44&type=' + encodeURIComponent('物理类') + '&score=600');
+    check('分数→位次（真实表）', rk.ok && rk.rank > 0, `600 分 -> 位次 ${rk.rank}（${rk.year} ${rk.type}，考生 ${rk.total}）`);
+    check('位次落在合理区间', rk.rank > 1000 && rk.rank < rk.total, `1 < ${rk.rank} < ${rk.total}`);
+    check('带原文链接', /^https?:\/\//.test(rk.url || ''), (rk.url || '').slice(0, 60));
+
+    const rk2 = await j('/api/resource/rank?provinceId=44&type=' + encodeURIComponent('物理类') + '&score=680');
+    check('单调性（高分位次更靠前）', rk2.ok && rk2.rank < rk.rank, `680 分 -> ${rk2.rank} < 600 分 -> ${rk.rank}`);
+
+    const rkInv = await j('/api/resource/rank?provinceId=44&type=' + encodeURIComponent('物理类') + '&rank=' + rk.rank);
+    check('位次→分数（可逆）', rkInv.ok && Math.abs(rkInv.score - 600) <= 2, `${rk.rank} -> ${rkInv.score} 分`);
+
+    const rtab = await j('/api/resource/rank?provinceId=44&year=2026&type=' + encodeURIComponent('物理类') + '&size=5');
+    check('完整表格可分页读取', rtab.ok && rtab.rows.length === 5 && rtab.count > 400, `${rtab.count} 档，返回 ${rtab.rows.length} 行`);
+    check('每行含本段与累计', rtab.rows.every((r) => r.length >= 3 && r[0] > 100 && r[1] >= r[2] && r[2] >= 0),
+      `[分数, 累计, 本段] = ${JSON.stringify(rtab.rows[0])}`);
+
+    // 交叉校验：本段人数之和 == 末档累计人数
+    const rfull = await j('/api/resource/rank?provinceId=44&year=2026&type=' + encodeURIComponent('物理类') + '&size=2000');
+    const sumCnt = rfull.rows.reduce((a, r) => a + r[2], 0);
+    const endCum = rfull.rows[rfull.rows.length - 1][1];
+    check('累计人数自洽（本段和 == 末档累计）', sumCnt === endCum, `${sumCnt} == ${endCum}`);
+
+    head('F5 · 资料库（院校代码 / 专业代码）');
+    const codes = await j('/api/resource/codes?schoolId=104&provinceId=44&year=2025');
+    check('院校国标代码', codes.nationalCode === '10558', `中山大学 = ${codes.nationalCode}`);
+    check('招生计划（含专业国标代码）', (codes.plan || []).length > 0, `${codes.plan?.length} 条`);
+    const clinical = (codes.plan || []).find((x) => x.majorCode === '100201K');
+    check('专业国标代码正确', !!clinical, clinical ? `${clinical.major} = ${clinical.majorCode}` : '未找到 100201K');
+    check('招生计划含计划数/学费/学制', (codes.plan || []).some((x) => x.planNum && x.tuition), codes.plan?.[0] ? `${codes.plan[0].planNum} 人 / ${codes.plan[0].tuition} / ${codes.plan[0].length}` : '');
+    check('省编专业代码', (codes.special || []).some((x) => x.provinceCode), `${codes.special?.length} 条专业线`);
+    const tsinghua = await j('/api/resource/codes?schoolId=140&provinceId=11&year=2025');
+    check('清华院校代码', tsinghua.nationalCode === '10003', `清华大学 = ${tsinghua.nationalCode}`);
+
+    head('F6 · 完整志愿方案（专业粒度）');
+    const plan = await j('/api/plan?provinceId=44&type=' + encodeURIComponent('物理类') + '&score=600&total=80&strategy=major&subjects=' + encodeURIComponent('物理,化学') + '&major=' + encodeURIComponent('计算机'));
+    check('方案生成成功', plan.ok, plan.ok ? '' : plan.message);
+    if (plan.ok) {
+      check('方案条数 ≈ 80', plan.slots.length >= 60 && plan.slots.length <= 90, `${plan.slots.length} 条`);
+      const tiers = {};
+      plan.slots.forEach((s) => { tiers[s.tierLabel] = (tiers[s.tierLabel] || 0) + 1; });
+      check('含冲稳保三档', tiers['冲'] > 0 && tiers['稳'] > 0 && tiers['保'] > 0, JSON.stringify(tiers));
+      check('用真实一分一段定位', /一分一段/.test(plan.meta.rankSource || ''), `${plan.meta.rank} (${plan.meta.rankSource})`);
+      check('每条含院校国标代码', plan.slots.every((s) => s.nationalCode), `${plan.slots.filter((s) => s.nationalCode).length}/${plan.slots.length}`);
+      check('专业粒度生效', plan.slots.filter((s) => s.major).length > 0, `${plan.slots.filter((s) => s.major).length} 条含具体专业`);
+      check('专业优先命中意向专业', plan.slots.filter((s) => /计算机/.test(s.major || '')).length > 0,
+        plan.slots.filter((s) => s.major).slice(0, 3).map((s) => s.major).join('/'));
+      check('选科过滤未放宽', plan.slots.every((s) => !s.subjectReq || !/历史/.test(s.subjectReq)), '无历史类要求混入');
+    }
+    const planSchool = await j('/api/plan?provinceId=44&type=' + encodeURIComponent('物理类') + '&score=600&total=40&strategy=school');
+    check('院校优先：每校至多一个专业组', planSchool.ok && new Set(planSchool.slots.map((s) => s.school.id)).size === planSchool.slots.length,
+      `${planSchool.slots?.length} 条 / ${new Set(planSchool.slots.map((s) => s.school.id)).size} 所院校`);
+
+    head('F7 · AI 助手（张雪峰技能）');
+    const skill = await j('/api/ai/skill');
+    check('技能已内嵌', skill.available && skill.bytes > 5000, `${skill.title} ${skill.bytes} 字`);
+    check('技能来源与协议', /github\.com\/alchaincyf/.test(skill.source) && skill.license === 'MIT', `${skill.source} (${skill.license})`);
+    const ep = await j('/api/ai/extract-prompt');
+    check('结论提炼提示词', ep.ok && ep.prompt.includes('JSON'), `${ep.prompt.length} 字`);
+    const noKey = await (await fetch(B + '/api/ai/chat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+    })).json();
+    check('未填 Key 时给出提示', noKey.ok === false && /API Key/.test(noKey.message || ''), noKey.message);
+
     head('边界与错误处理');
     const bad = await j('/api/recommend?provinceId=99&type=' + encodeURIComponent('综合') + '&score=600');
     check('非法省份给出提示', bad.ok === false && !!bad.message, bad.message?.slice(0, 40));

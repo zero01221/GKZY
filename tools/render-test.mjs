@@ -51,11 +51,28 @@ function makeEl(tag = 'div') {
 
 function installDom() {
   const registry = new Map();
+  const listeners = new Map();          // 极简事件总线，让 'app-ready' 能真正触发
   const document = {
     querySelector(sel) { if (!registry.has(sel)) registry.set(sel, makeEl(sel)); return registry.get(sel); },
     querySelectorAll() { return []; },
     createElement(tag) { return makeEl(tag); },
-    addEventListener() {},
+    // 真实浏览器里 getElementById 与 querySelector('#id') 返回同一元素，
+    // 这里复用同一个键，保证两种取法看到的状态一致
+    getElementById(id) { return this.querySelector('#' + id); },
+    addEventListener(type, fn) {
+      if (!listeners.has(type)) listeners.set(type, []);
+      listeners.get(type).push(fn);
+    },
+    removeEventListener(type, fn) {
+      const arr = listeners.get(type);
+      if (arr) listeners.set(type, arr.filter((x) => x !== fn));
+    },
+    dispatchEvent(ev) {
+      for (const fn of listeners.get(ev && ev.type) || []) {
+        try { fn(ev); } catch (e) { console.error('事件处理抛错', ev.type, e); }
+      }
+      return true;
+    },
   };
   document.body = makeEl('body');
   document.documentElement = makeEl('html');
@@ -90,6 +107,8 @@ function loadApp() {
     console, setTimeout, clearTimeout, setInterval, clearInterval,
     URL: { createObjectURL: () => 'blob:x', revokeObjectURL() {} },
     Blob: class { constructor() {} },
+    CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init && init.detail; } },
+    Event: class { constructor(type) { this.type = type; } },
     confirm: () => true,
     alert: () => {},
     localStorage: {
@@ -106,12 +125,16 @@ function loadApp() {
   const ctx = vm.createContext(sandbox);
 
   const src = fs.readFileSync(path.join(APP, 'web', 'app.js'), 'utf8');
+  const src2 = fs.readFileSync(path.join(APP, 'web', 'plan-ui.js'), 'utf8');
   // 脚本顶层 function 声明会成为沙箱全局属性，借此暴露内部函数用于断言
   const driver = `
     globalThis.__t = { S, esc, fmt, lineChart, tierTag, renderScoreResult, renderRecommend, recCard,
-      renderWishlist, renderData, showCampus, runCampusSearch, runScoreQuery, runRecommend, loadTrend };
+      renderWishlist, renderData, showCampus, runCampusSearch, runScoreQuery, runRecommend, loadTrend,
+      runPlan, renderPlan, planRow, renderSubjectChips, selectedSubjects, exportPlan, moveSlot,
+      initResource, refreshRankOptions, queryRankScore, showRankTable, queryCodes,
+      aiRenderMessages, renderMarkdown, renderAiAdvice, refreshAiProfile, aiCfgLoad, aiCfgSave, AI, PLAN };
   `;
-  vm.runInContext(src + driver, ctx, { filename: 'app.js' });
+  vm.runInContext(src + '\n' + src2 + driver, ctx, { filename: 'app.js' });
   return { ctx, t: sandbox.__t, registry, doc: document };
 }
 
@@ -295,6 +318,169 @@ async function check(name, fn) {
   await check('API 元信息完整性', () => {
     if (!meta.schoolCount || !meta.collegeCount) throw new Error('meta 缺字段');
     return `院校 ${meta.schoolCount} / 大学环境 ${meta.collegeCount}`;
+  });
+
+  // ================= 新增：志愿方案 / 资料库 / AI =================
+  console.log('\n  ── 志愿方案 ──');
+
+  await check('renderSubjectChips 选科按钮', () => {
+    t.renderSubjectChips();
+    const html = registry.get('#p-subjects')?.innerHTML || '';
+    if (!html.includes('物理') || !html.includes('化学')) throw new Error('未渲染选科按钮');
+    return `${html.length} 字符`;
+  });
+
+  await check('runPlan 生成完整志愿方案（80 条）', async () => {
+    el('p-province').value = '44';
+    el('p-type').value = '物理类';
+    el('p-mode').value = 'score';
+    el('p-score').value = '600';
+    el('p-rank').value = '';
+    el('p-major').value = '计算机';
+    el('p-strategy').value = 'major';
+    el('p-total').value = '80';
+    el('p-ratios').value = '30:40:30';
+    t.runPlan();
+    await sleep(4000);
+    const html = registry.get('#p-result')?.innerHTML || '';
+    if (html.includes('undefined') || html.includes('NaN')) throw new Error('HTML 含 undefined/NaN');
+    if (!html.includes('志愿方案')) throw new Error('未渲染方案：' + html.replace(/<[^>]+>/g, ' ').trim().slice(0, 80));
+    const n = t.PLAN.slots.length;
+    if (n < 20) throw new Error(`方案条数过少：${n}`);
+    return `${n} 条，${html.length} 字符`;
+  });
+
+  await check('方案含冲稳保三档', () => {
+    const tiers = new Set(t.PLAN.slots.map((s) => s.tierLabel));
+    for (const x of ['冲', '稳', '保']) if (!tiers.has(x)) throw new Error(`缺少「${x}」档`);
+    const g = {};
+    t.PLAN.slots.forEach((s) => { g[s.tierLabel] = (g[s.tierLabel] || 0) + 1; });
+    return JSON.stringify(g);
+  });
+
+  await check('方案条目含院校代码与专业信息', () => {
+    const withCode = t.PLAN.slots.filter((s) => s.nationalCode).length;
+    const withMajor = t.PLAN.slots.filter((s) => s.major).length;
+    if (!withCode) throw new Error('没有任何院校代码');
+    return `${withCode}/${t.PLAN.slots.length} 有院校代码，${withMajor} 有具体专业`;
+  });
+
+  await check('moveSlot 调整顺序', () => {
+    const a = t.PLAN.slots[0].school.name, b = t.PLAN.slots[1].school.name;
+    t.moveSlot(0, 1);
+    if (t.PLAN.slots[0].school.name !== b) throw new Error('顺序未交换');
+    t.moveSlot(1, -1);                        // 换回来
+    if (t.PLAN.slots[0].school.name !== a) throw new Error('顺序未还原');
+    return `${a} ⇄ ${b}`;
+  });
+
+  await check('planRow 单条渲染', () => {
+    const html = t.planRow(t.PLAN.slots[0], 0);
+    if (html.includes('undefined') || html.includes('NaN')) throw new Error('含 undefined/NaN');
+    if (!html.includes(t.PLAN.slots[0].school.name)) throw new Error('未含院校名');
+    return `${html.length} 字符`;
+  });
+
+  await check('exportPlan 生成 CSV', () => {
+    t.exportPlan();   // download() 在沙箱里是假实现，只验证不抛错
+    return `${t.PLAN.slots.length} 行`;
+  });
+
+  console.log('\n  ── 资料库 ──');
+
+  await check('initResource 加载一分一段索引', async () => {
+    await t.initResource();
+    await sleep(800);
+    const html = registry.get('#res-hint')?.innerHTML || '';
+    if (!html.includes('一分一段')) throw new Error('未渲染提示');
+    return html.replace(/<[^>]+>/g, ' ').trim().slice(0, 70);
+  });
+
+  await check('queryRankScore 分数查位次', async () => {
+    el('rk-province').value = '广东';
+    el('rk-year').value = '2026';
+    el('rk-type').value = '物理类';
+    el('rk-score').value = '600';
+    t.queryRankScore();
+    await sleep(2500);
+    const html = registry.get('#rk-result')?.innerHTML || '';
+    if (html.includes('undefined') || html.includes('NaN')) throw new Error('含 undefined/NaN');
+    if (!html.includes('全省位次')) throw new Error('未渲染位次：' + html.replace(/<[^>]+>/g, ' ').trim().slice(0, 80));
+    return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60);
+  });
+
+  await check('showRankTable 完整表格', async () => {
+    t.showRankTable();
+    await sleep(2500);
+    const html = registry.get('#rk-result')?.innerHTML || '';
+    if (!html.includes('一分一段表')) throw new Error('未渲染表格');
+    if (!html.includes('累计人数')) throw new Error('缺表头');
+    return `${html.length} 字符`;
+  });
+
+  await check('queryCodes 院校/专业代码', async () => {
+    el('cd-school').value = '中山大学';
+    el('cd-province').value = '44';
+    el('cd-year').value = '2025';
+    t.queryCodes();
+    await sleep(6000);
+    const html = registry.get('#cd-result')?.innerHTML || '';
+    if (html.includes('undefined')) throw new Error('含 undefined');
+    if (!html.includes('院校国标代码')) throw new Error('未渲染代码：' + html.replace(/<[^>]+>/g, ' ').trim().slice(0, 80));
+    if (!html.includes('100201K') && !html.includes('专业代码')) throw new Error('未渲染专业代码');
+    return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 70);
+  });
+
+  console.log('\n  ── AI 助手 ──');
+
+  await check('renderMarkdown 渲染', () => {
+    const h = t.renderMarkdown('## 标题\n- **加粗** 列表\n\n第二段');
+    if (!h.includes('<h3>') || !h.includes('<b>') || !h.includes('<li>')) throw new Error('markdown 渲染异常：' + h);
+    return `${h.length} 字符`;
+  });
+
+  await check('aiRenderMessages 空状态 + 消息', () => {
+    t.aiRenderMessages();
+    const empty = registry.get('#ai-messages')?.innerHTML || '';
+    if (!empty.includes('API 设置')) throw new Error('空状态未提示');
+    t.AI.messages.push({ role: 'user', content: '你好' }, { role: 'assistant', content: '**答**：你好' });
+    t.aiRenderMessages();
+    const html = registry.get('#ai-messages')?.innerHTML || '';
+    if (!html.includes('AI 顾问')) throw new Error('未渲染 AI 消息');
+    t.AI.messages.length = 0;
+    t.aiRenderMessages();
+    return '两种状态正常';
+  });
+
+  await check('renderAiAdvice 结构化建议卡片', () => {
+    t.renderAiAdvice({
+      summary: '建议以计算机为主',
+      profile: { province: '广东', type: '物理类', score: 600, rank: 30891 },
+      items: [
+        { tier: '冲', school: '华南理工大学', major: '计算机科学与技术', reason: '985 平台好', note: '' },
+        { tier: '稳', school: '暨南大学', major: '软件工程', reason: '位次匹配', note: '' },
+        { tier: '保', school: '广东工业大学', major: '计算机类', reason: '保底', note: '' },
+      ],
+    });
+    const html = registry.get('#ai-result')?.innerHTML || '';
+    if (html.includes('undefined')) throw new Error('含 undefined');
+    if (!html.includes('华南理工大学') || !html.includes('软件工程')) throw new Error('未渲染建议卡片');
+    return `${html.length} 字符`;
+  });
+
+  await check('refreshAiProfile 带入考生档案', () => {
+    t.refreshAiProfile();
+    if (!t.AI.profile || !t.AI.profile.省份) throw new Error('档案为空');
+    return Object.keys(t.AI.profile).join('/');
+  });
+
+  await check('AI 设置读写 localStorage', () => {
+    el('ai-base').value = 'https://api.deepseek.com/v1';
+    el('ai-key').value = 'sk-test';
+    el('ai-model').value = 'deepseek-chat';
+    t.aiCfgSave();
+    if (t.AI.cfg.model !== 'deepseek-chat') throw new Error('保存失败');
+    return t.AI.cfg.base;
   });
 
   console.log(results.map(([m, n, d]) => `  ${m} ${n}${d ? '  — ' + d : ''}`).join('\n'));

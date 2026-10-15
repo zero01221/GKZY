@@ -53,7 +53,47 @@ for (const f of files) {
 }
 console.log(`  生成 ${ok} 个索引文件，累计 ${rows.toLocaleString()} 条记录（跳过空/无效 ${skipped} 个）`);
 
-console.log('\n== 3. 汇总 ==');
+console.log('\n== 3. 资料库：一分一段表 ==');
+{
+  const src = path.join(ROOT, 'data', 'resources', 'rank_table.json');
+  if (fs.existsSync(src)) {
+    const d = JSON.parse(fs.readFileSync(src, 'utf8'));
+    // 只保留应用需要的字段（去掉原始表格与图片列表，体积可减小一半以上）
+    const items = (d.items || []).filter((x) => Array.isArray(x.series) && x.series.length).map((x) => ({
+      province: x.province, year: x.year, type: x.type || '综合', title: x.title,
+      url: x.url, series: x.series, range: x.range, total: x.total,
+      gaps: x.gaps || [], full: !!x.full, blocks: x.blocks || 1,
+    }));
+    const imgOnly = (d.items || []).filter((x) => !Array.isArray(x.series)).map((x) => ({
+      province: x.province, year: x.year, type: x.type || '', title: x.title, url: x.url,
+    }));
+    const out = {
+      source: d.source, updatedAt: d.updatedAt, normalizedAt: d.normalizedAt,
+      items, imageOnly: imgOnly,
+    };
+    const gz = zlib.gzipSync(Buffer.from(JSON.stringify(out)), { level: 9 });
+    fs.writeFileSync(path.join(APP_DATA, 'rank_table.json.gz'), gz);
+    const plain = path.join(APP_DATA, 'rank_table.json');
+    if (fs.existsSync(plain)) fs.unlinkSync(plain);
+    console.log(`  ✓ rank_table.json.gz  ${items.length} 张表（${new Set(items.map((x) => x.province)).size} 个省）+ ${imgOnly.length} 条图片发布记录  ${(gz.length / 1024).toFixed(0)} KB`);
+  } else {
+    console.log('  ✗ 缺少 data/resources/rank_table.json，请先运行 tools/crawl_resources.mjs rank');
+  }
+}
+
+console.log('\n== 4. 资料库：AI 技能提示词 ==');
+{
+  const src = path.join(ROOT, 'data', 'skill', 'SKILL.md');
+  if (fs.existsSync(src)) {
+    const txt = fs.readFileSync(src);
+    fs.writeFileSync(path.join(APP_DATA, 'skill_zhangxuefeng.md'), txt);
+    console.log(`  ✓ skill_zhangxuefeng.md  ${(txt.length / 1024).toFixed(1)} KB`);
+  } else {
+    console.log('  ✗ 缺少 data/skill/SKILL.md');
+  }
+}
+
+console.log('\n== 5. 汇总 ==');
 let total = 0;
 for (const f of fs.readdirSync(APP_DATA, { withFileTypes: true })) {
   const p = path.join(APP_DATA, f.name);

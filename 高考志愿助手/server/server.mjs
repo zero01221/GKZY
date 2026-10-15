@@ -21,6 +21,12 @@ import {
 } from './upstream.mjs';
 import { recommend } from './recommend.mjs';
 import { enqueue, enqueueMany, startIndexer, indexerStatus, autoBootstrap, coverage, quickIndex } from './indexer.mjs';
+import {
+  listRankTables, listImageOnly, getRankTable, realScoreToRank, realRankToScore, availableRank,
+  getPlanCodes, getSpecialCodes, schoolNationalCode, resourceStatus,
+} from './resources.mjs';
+import { buildPlan } from './plan.mjs';
+import { skillInfo, chatProxy, EXTRACT_PROMPT } from './ai.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = path.join(APP_DIR, 'web');
@@ -59,9 +65,9 @@ const toNum = (v, d = 0) => { const n = Number(v); return Number.isFinite(n) ? n
 // ---------------------------------------------------------------
 // API 路由
 // ---------------------------------------------------------------
-async function handleApi(req, res, url) {
+async function handleApi(req, res, url, body) {
   const p = url.pathname.replace(/^\/api/, '');
-  const q = Object.fromEntries(url.searchParams.entries());
+  const q = { ...Object.fromEntries(url.searchParams.entries()), ...(body && typeof body === 'object' ? body : {}) };
 
   // ---- 元信息 ----
   if (p === '/meta') {
@@ -299,6 +305,97 @@ async function handleApi(req, res, url) {
     return sendJson(res, { ok: true, detail });
   }
 
+  // ---- 资料库：一分一段表（真实数据） ----
+  if (p === '/resource/status') return sendJson(res, { ok: true, ...resourceStatus() });
+
+  if (p === '/resource/rank/list') {
+    return sendJson(res, {
+      ok: true, tables: listRankTables(), imageOnly: listImageOnly(),
+      source: resourceStatus().source, updatedAt: resourceStatus().updatedAt,
+    });
+  }
+
+  if (p === '/resource/rank') {
+    const pid = toNum(q.provinceId);
+    if (!pid) return sendJson(res, { ok: false, message: '缺少 provinceId' }, 400);
+    const type = q.type || '';
+    if (q.score) {
+      const r = realScoreToRank(pid, type, toNum(q.score), toNum(q.year) || null);
+      if (!r) {
+        const av = availableRank(pid);
+        return sendJson(res, { ok: false, message: av.length ? '未找到匹配的一分一段表' : `暂无「${PROVINCE_NAME.get(pid) || pid}」的一分一段表（官方可能仅以图片发布）`, available: av });
+      }
+      return sendJson(res, { ok: true, mode: 'score2rank', score: toNum(q.score), ...r });
+    }
+    if (q.rank) {
+      const r = realRankToScore(pid, type, toNum(q.rank), toNum(q.year) || null);
+      if (!r) return sendJson(res, { ok: false, message: '暂无该省一分一段表' });
+      return sendJson(res, { ok: true, mode: 'rank2score', rank: toNum(q.rank), ...r });
+    }
+    if (q.year && type) {
+      const t = getRankTable(pid, toNum(q.year), type);
+      if (!t) return sendJson(res, { ok: false, message: '未找到该表' }, 404);
+      const page = Math.max(1, toNum(q.page, 1));
+      const size = Math.min(toNum(q.size, 300), 2000);
+      return sendJson(res, {
+        ok: true, province: t.province, year: t.year, type: t.type, title: t.title, url: t.url,
+        total: t.total, range: t.range, full: t.full, gaps: t.gaps, blocks: t.blocks,
+        count: t.series.length, page, size,
+        rows: t.series.slice((page - 1) * size, page * size),
+      });
+    }
+    return sendJson(res, { ok: true, available: availableRank(pid) });
+  }
+
+  // ---- 资料库：院校代码 / 专业代码 ----
+  if (p === '/resource/codes') {
+    const sid = toNum(q.schoolId), pid = toNum(q.provinceId);
+    const year = toNum(q.year) || new Date().getFullYear();
+    if (!sid) return sendJson(res, { ok: false, message: '缺少 schoolId' }, 400);
+    const s = getSchool(sid);
+    const want = q.with || 'both';
+    let plan = { items: [] }, spec = { items: [] };
+    if (pid && (want === 'both' || want === 'plan')) plan = await getPlanCodes(sid, pid, year);
+    if (pid && (want === 'both' || want === 'special')) spec = await getSpecialCodes(sid, pid, year);
+    return sendJson(res, {
+      ok: true, year, provinceId: pid,
+      school: s ? { id: s.id, name: s.name, province: s.province, city: s.city, level: s.level, type: s.type, nature: s.nature } : null,
+      nationalCode: schoolNationalCode(sid),
+      plan: plan.items || [], planFailed: !!plan.failed, planPartial: !!plan.partial, planCached: !!plan.cached,
+      special: spec.items || [], specialFailed: !!spec.failed, specialPartial: !!spec.partial, specialCached: !!spec.cached,
+    });
+  }
+
+  // ---- 志愿方案生成 ----
+  if (p === '/plan') {
+    try {
+      const out = await buildPlan({
+        provinceId: toNum(q.provinceId),
+        type: q.type || '',
+        subjects: Array.isArray(q.subjects) ? q.subjects : String(q.subjects || '').split(',').filter(Boolean),
+        score: toNum(q.score), rank: toNum(q.rank) || null,
+        major: q.major || '', batch: q.batch || '',
+        strategy: q.strategy || 'school',
+        total: toNum(q.total, 80),
+        ratios: q.ratios || null,
+      });
+      return sendJson(res, out);
+    } catch (e) {
+      const pid = toNum(q.provinceId);
+      if ((e.code === 'NO_INDEX' || e.code === 'NO_DATA') && pid) {
+        const y = toNum(q.year) || new Date().getFullYear();
+        enqueue(pid, y, 1, 'province');
+        startIndexer();
+      }
+      return sendJson(res, { ok: false, code: e.code || 'ERR', message: e.message }, 200);
+    }
+  }
+
+  // ---- AI 对话（张雪峰技能） ----
+  if (p === '/ai/skill') return sendJson(res, { ok: true, ...skillInfo() });
+  if (p === '/ai/extract-prompt') return sendJson(res, { ok: true, prompt: EXTRACT_PROMPT });
+  if (p === '/ai/chat') return chatProxy(q, res);
+
   // ---- 数据状态 / 同步 ----
   if (p === '/status') return sendJson(res, { ok: true, indexer: indexerStatus(), coverage: coverage(), upstream: upstreamStatus() });
 
@@ -370,7 +467,11 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   try {
     if (url.pathname.startsWith('/api/')) {
-      await handleApi(req, res, url);
+      let body = null;
+      if (req.method === 'POST' || req.method === 'PUT') {
+        body = await readBody(req);
+      }
+      await handleApi(req, res, url, body);
     } else {
       serveStatic(req, res, url);
     }
@@ -379,6 +480,24 @@ const server = http.createServer(async (req, res) => {
     else res.end();
   }
 });
+
+function readBody(req) {
+  return new Promise((resolve) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > 4 * 1024 * 1024) { req.destroy(); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8');
+      if (!raw) return resolve(null);
+      try { resolve(JSON.parse(raw)); } catch { resolve(null); }
+    });
+    req.on('error', () => resolve(null));
+  });
+}
 
 // ---------------------------------------------------------------
 function listen(port, attempt = 0) {

@@ -42,6 +42,15 @@ function writeJson(file, obj, gzip = false) {
   else fs.writeFileSync(file, txt);
 }
 
+/** 带内存缓存的只读 JSON（大文件避免重复解压） */
+const jsonCache = new Map();
+export function readJsonCached(file, fallback = null) {
+  if (jsonCache.has(file)) return jsonCache.get(file);
+  const v = readJson(file, fallback);
+  jsonCache.set(file, v);
+  return v;
+}
+
 // ------------------------------------------------------------------
 // 院校库
 // ------------------------------------------------------------------
@@ -131,6 +140,75 @@ export function saveProvinceIndex(pid, year, data) {
   // 注意：索引必须写成未压缩的 .json，否则读取端（indexFile 无 .gz 后缀）会读不到
   writeJson(indexFile(pid, year), data, false);
   indexCache.set(`${pid}_${year}`, { at: Date.now(), data });
+}
+
+// ------------------------------------------------------------------
+// 专业粒度索引（按省-年）
+//   data/index/special_<pid>_<year>.json
+//   { dict:{major,category,className,type,batch,group,subj,code},
+//     rows:[[schoolId, majorIdx, typeIdx, batchIdx, groupIdx, subjIdx, min, minRank, batchLine, codeIdx, catIdx, classIdx]] }
+// ------------------------------------------------------------------
+const specialCache = new Map();
+
+export function specialIndexFile(pid, year) { return path.join(INDEX_DIR, `special_${pid}_${year}.json`); }
+
+export function loadSpecialIndex(pid, year) {
+  const key = `${pid}_${year}`;
+  const c = specialCache.get(key);
+  if (c && Date.now() - c.at < INDEX_TTL) return c.data;
+  const data = readJson(specialIndexFile(pid, year), null);
+  if (data) specialCache.set(key, { at: Date.now(), data });
+  return data;
+}
+
+export function saveSpecialIndex(pid, year, data) {
+  writeJson(specialIndexFile(pid, year), data, false);
+  specialCache.set(`${pid}_${year}`, { at: Date.now(), data });
+}
+
+export function hasSpecialIndex(pid, year) {
+  return fs.existsSync(specialIndexFile(pid, year));
+}
+
+export function compactSpecialRecords(items) {
+  const dict = { major: [], category: [], className: [], type: [], batch: [], group: [], subj: [], code: [] };
+  const di = (k, v) => {
+    const s = String(v ?? '').trim();
+    if (!s) return -1;
+    let i = dict[k].indexOf(s);
+    if (i < 0) { dict[k].push(s); i = dict[k].length - 1; }
+    return i;
+  };
+  const rows = [];
+  for (const it of items) {
+    const min = Number(it.min);
+    if (!Number.isFinite(min) || min <= 0) continue;
+    rows.push([
+      Number(it.school_id),
+      di('major', it.sp_name),
+      di('type', it.local_type_name),
+      di('batch', it.local_batch_name),
+      di('group', it.sg_name),
+      di('subj', it.sg_info),
+      min,
+      Number(it.min_section) || 0,
+      Number(it.proscore) || 0,
+      di('code', it.sp_scode),
+      di('category', it.level2_name),
+      di('className', it.level3_name),
+    ]);
+  }
+  return { dict, rows };
+}
+
+/** 某省某年是否有专业粒度索引 */
+export function specialYears(pid) {
+  const out = [];
+  for (const f of fs.readdirSync(INDEX_DIR)) {
+    const m = /^special_(\d+)_(\d+)\.json$/.exec(f);
+    if (m && Number(m[1]) === Number(pid)) out.push(Number(m[2]));
+  }
+  return out.sort((a, b) => b - a);
 }
 
 /** 把上游原始记录压缩为索引行 */
