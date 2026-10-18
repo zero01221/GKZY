@@ -14,10 +14,12 @@
  *   - school（院校优先）：每所院校只保留一个最优单元，优先院校层次
  *   - major（专业优先）：优先命中意向专业的单元，同一院校可保留多个专业
  */
+import { PROVINCE_NAME, getSchool, scoreToRank } from './data.mjs';
 import {
-  PROVINCE_NAME, getSchool, loadProvinceIndex, indexedYears,
-  loadSpecialIndex, specialYears, getBatchLines, scoreToRank,
-} from './data.mjs';
+  provinceIndex as loadProvinceIndex, indexedYears,
+  specialIndex as loadSpecialIndex, specialYears,
+  batchLines as getBatchLines,
+} from './gcsource.mjs';
 import { realScoreToRank, matchSubjects } from './resources.mjs';
 
 const WEIGHTS = [1.0, 0.7, 0.5, 0.35, 0.2];

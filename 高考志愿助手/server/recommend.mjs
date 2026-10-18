@@ -11,8 +11,11 @@
  * 分档：冲 P < 45% ≤ 稳 P < 80% ≤ 保
  */
 import {
-  PROVINCE_NAME, getSchool, loadProvinceIndex, indexedYears, getBatchLines,
+  PROVINCE_NAME, getSchool,
 } from './data.mjs';
+import {
+  provinceIndex as loadProvinceIndex, indexedYears, batchLines as getBatchLines,
+} from './gcsource.mjs';
 import { schoolSpecialScores } from './upstream.mjs';
 
 const WEIGHTS = [1.0, 0.7, 0.5, 0.35, 0.2];

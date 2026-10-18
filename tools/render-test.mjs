@@ -426,8 +426,10 @@ async function check(name, fn) {
     await sleep(6000);
     const html = registry.get('#cd-result')?.innerHTML || '';
     if (html.includes('undefined')) throw new Error('含 undefined');
-    if (!html.includes('院校国标代码')) throw new Error('未渲染代码：' + html.replace(/<[^>]+>/g, ' ').trim().slice(0, 80));
-    if (!html.includes('100201K') && !html.includes('专业代码')) throw new Error('未渲染专业代码');
+    if (!html.includes('院校代码')) throw new Error('未渲染代码：' + html.replace(/<[^>]+>/g, ' ').trim().slice(0, 80));
+    if (!html.includes('10558')) throw new Error('未渲染院校代码数值');
+    if (!html.includes('专业代码')) throw new Error('未渲染专业代码表头');
+    if (!/\d+[A-Z]?<\/b>/.test(html)) throw new Error('未渲染任何专业代码');
     return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 70);
   });
 

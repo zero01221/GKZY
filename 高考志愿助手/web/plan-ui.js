@@ -296,16 +296,19 @@ async function queryCodes() {
     <div class="card">
       <div class="filters" style="align-items:center">
         <h2 class="h2">${esc(r.school?.name || name)}</h2>
-        <span class="tag" style="background:#fee2e2;color:#b91c1c">院校国标代码 <b style="font-size:15px">${esc(r.nationalCode || '—')}</b></span>
+        <span class="tag" style="background:#fee2e2;color:#b91c1c">院校代码 <b style="font-size:15px">${esc(r.nationalCode || '—')}</b></span>
         <span class="tag">${esc(r.school?.province || '')} · ${esc(r.school?.level || '')}</span>
         <span class="tag">${r.year} 年 · ${esc(provinceLabel)}</span>
+        ${r.specialSource ? `<span class="tag tpub">数据源：${esc(r.specialSource)}</span>` : ''}
         <div class="spacer"></div>
         <a class="btn sm" href="https://www.gaokao.cn/school/${school.id}" target="_blank" rel="noopener">掌上高考 ↗</a>
       </div>
-      <div class="hint">院校代码为教育部国标代码；不同省份的<b>招生代码</b>可能另有编排，请以本省当年《招生专业目录》为准。</div>
+      ${r.provinceCodes && r.provinceCodes.length ? `<div class="hint">该校<b>历年招生院校代码</b>：${r.provinceCodes.slice(0, 12).map((c) => `${c.year}年 <b>${esc(c.code)}</b>`).join(' · ')}</div>` : ''}
+      <div class="hint">院校代码优先取统一数据集里的招生代码，其次取教育部国标代码（5 位）。不同省份的<b>招生代码</b>编排不同，请以本省当年《招生专业目录》为准。</div>
     </div>
     <div class="card">
-      <h2 class="h2">招生计划 · 专业国标代码 <span class="pill">${(r.plan || []).length}</span>
+      <h2 class="h2">招生计划 · 专业代码 <span class="pill">${(r.plan || []).length}</span>
+        ${r.planSource ? `<span class="tag tpub">数据源：${esc(r.planSource)}</span>` : ''}
         ${r.planFailed ? '<span class="tag" style="background:#fef3c7;color:#92400e">上游限流，稍后重试</span>' : ''}
         ${r.planPartial ? '<span class="tag" style="background:#fef3c7;color:#92400e">部分结果</span>' : ''}</h2>
       ${planRows ? `<div class="tablewrap" style="margin-top:10px;max-height:520px;overflow-y:auto"><table>
@@ -313,10 +316,11 @@ async function queryCodes() {
         <tbody>${planRows}</tbody></table></div>` : emptyBox('📭', '暂无招生计划数据')}
     </div>
     <div class="card">
-      <h2 class="h2">专业录取线 · 省编专业代码 <span class="pill">${(r.special || []).length}</span>
+      <h2 class="h2">专业录取线 · ${esc(r.codeType || '专业代码')} <span class="pill">${(r.special || []).length}</span>
+        ${r.specialSource ? `<span class="tag tpub">数据源：${esc(r.specialSource)}</span>` : ''}
         ${r.specialFailed ? '<span class="tag" style="background:#fef3c7;color:#92400e">上游限流，稍后重试</span>' : ''}</h2>
       ${spRows ? `<div class="tablewrap" style="margin-top:10px;max-height:520px;overflow-y:auto"><table>
-        <thead><tr><th>专业组</th><th>省编代码</th><th>专业名称</th><th>选科要求</th><th>最低分</th><th>最低位次</th><th>科类</th></tr></thead>
+        <thead><tr><th>专业组</th><th>专业代码</th><th>专业名称</th><th>选科要求</th><th>最低分</th><th>最低位次</th><th>科类</th></tr></thead>
         <tbody>${spRows}</tbody></table></div>` : emptyBox('📭', '暂无专业分数线数据')}
     </div>`;
   } catch (e) { box.innerHTML = emptyBox('⚠️', '查询失败：' + esc(e.message)); }

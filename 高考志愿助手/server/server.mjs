@@ -23,10 +23,11 @@ import { recommend } from './recommend.mjs';
 import { enqueue, enqueueMany, startIndexer, indexerStatus, autoBootstrap, coverage, quickIndex } from './indexer.mjs';
 import {
   listRankTables, listImageOnly, getRankTable, realScoreToRank, realRankToScore, availableRank,
-  getPlanCodes, getSpecialCodes, schoolNationalCode, resourceStatus,
+  getPlanCodes, getSpecialCodes, schoolNationalCode, schoolAllCodes, resourceStatus,
 } from './resources.mjs';
 import { buildPlan } from './plan.mjs';
 import { skillInfo, chatProxy, EXTRACT_PROMPT } from './ai.mjs';
+import { source as gcsSource, info as gcsInfo, provinceTypes as gcsProvinceTypes, init as gcsInit } from './gcsource.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = path.join(APP_DIR, 'web');
@@ -72,9 +73,10 @@ async function handleApi(req, res, url, body) {
   // ---- 元信息 ----
   if (p === '/meta') {
     const schools = allSchools();
+    const gci = gcsInfo();
     return sendJson(res, {
       ok: true,
-      version: '1.0.0',
+      version: '1.1.0',
       schoolCount: schools.length,
       collegeCount: (loadColleges().schools || []).length,
       provinces: PROVINCES.map(([id, name]) => ({ id, name })),
@@ -82,7 +84,14 @@ async function handleApi(req, res, url, body) {
       coverage: coverage(),
       indexFiles: indexStats().length,
       now: new Date().toISOString(),
-      source: '掌上高考 / colleges.chat',
+      dataSource: gci.source === 'sqlite' ? 'GaokaoCompass + gaokao-vault（SQLite）' : '掌上高考（本地 JSON 索引）',
+      gc: gci.source === 'sqlite' ? {
+        years: `${gci.years.a}-${gci.years.b}`,
+        scoreRange: gci.scoreRange, schoolAdm: gci.schoolAdm,
+        majorAdm: gci.majorAdm, planCode: gci.planCode, schoolCode: gci.schoolCode,
+        dbMB: Math.round(gci.bytes / 1024 / 1024),
+      } : null,
+      source: '掌上高考 / GaokaoCompass / 中国教育在线 / colleges.chat',
     });
   }
 
@@ -91,9 +100,13 @@ async function handleApi(req, res, url, body) {
     const pid = toNum(q.provinceId);
     const years = pid ? indexedYears(pid) : [];
     const types = new Set();
-    for (const y of years) {
-      const ix = loadProvinceIndex(pid, y);
-      (ix?.dict?.type || []).forEach((t) => t && types.add(t));
+    if (gcsInfo().source === 'sqlite') {
+      for (const y of years.slice(0, 4)) for (const t of gcsProvinceTypes(pid, y)) types.add(t);
+    } else {
+      for (const y of years) {
+        const ix = loadProvinceIndex(pid, y);
+        (ix?.dict?.type || []).forEach((t) => t && types.add(t));
+      }
     }
     return sendJson(res, {
       ok: true,
@@ -361,8 +374,12 @@ async function handleApi(req, res, url, body) {
       ok: true, year, provinceId: pid,
       school: s ? { id: s.id, name: s.name, province: s.province, city: s.city, level: s.level, type: s.type, nature: s.nature } : null,
       nationalCode: schoolNationalCode(sid),
+      provinceCodes: schoolAllCodes(sid).slice(0, 30),
       plan: plan.items || [], planFailed: !!plan.failed, planPartial: !!plan.partial, planCached: !!plan.cached,
+      planSource: plan.source || '',
       special: spec.items || [], specialFailed: !!spec.failed, specialPartial: !!spec.partial, specialCached: !!spec.cached,
+      codeType: spec.codeType || '省编专业代码',
+      specialSource: spec.source || '',
     });
   }
 
@@ -544,5 +561,16 @@ function listen(port, attempt = 0) {
 console.log('  正在加载院校库…');
 const n = loadSchools();
 console.log(`  院校库加载完成：${n} 所`);
+try {
+  const g = gcsInit();
+  if (g.source === 'sqlite') {
+    const i = gcsInfo();
+    console.log(`  统一数据源已启用：GaokaoCompass + gaokao-vault（SQLite，${Math.round(i.bytes / 1024 / 1024)} MB）`);
+    console.log(`    一分一段 ${i.scoreRange.toLocaleString()} 行 · 投档线 ${i.schoolAdm.toLocaleString()} 行 · 专业录取 ${i.majorAdm.toLocaleString()} 行 · 招生计划 ${i.planCode.toLocaleString()} 行`);
+    console.log(`    年份 ${i.years.a}-${i.years.b} · 院校合并后 ${g.schools} 所`);
+  } else {
+    console.log('  统一数据源未找到（未发现 gaokao.db / gaokao.db.gz），回退到本地 JSON 索引');
+  }
+} catch (e) { console.log('  ⚠ 统一数据源初始化失败：' + e.message); }
 try { loadColleges(); console.log('  大学环境数据加载完成'); } catch { console.log('  ⚠ 大学环境数据缺失，功能 2 将不可用'); }
 listen(START_PORT);

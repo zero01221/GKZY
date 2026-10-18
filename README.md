@@ -138,10 +138,26 @@ tools\setup-runtime.bat
 
 查看本地数据覆盖情况、后台同步进度、上游接口状态。
 
-- **本工具默认不会自动抓取数据**，避免给你的网络带来限流风险。
-- 安装包已内置部分省份的录取数据（见下表）。缺少的省份可以在这里**按需同步**：
+- **内置数据已覆盖全国 31 省 2017–2025 年**（详见下方「数据说明」），不需要再手动同步。
+- 若想补齐 2026 或某省缺失年份，可在这里**按需同步**：
   选择省份 → 点「同步该省份」→ 后台限速抓取，**不影响你继续使用页面**。
 - 想一次性补齐，可点「补齐最近三年全部省份」（耗时较长，可随时关闭程序，下次会从断点继续）。
+
+**数据是怎么存的（轻量设计）**
+
+全部数据打包成 **一个 SQLite 文件**（`data/gaokao.db`），随包发布的是它的 Brotli 压缩版
+`data/gaokao.db.gz`（约 52 MB），首次启动自动解压（约 1 秒）。
+
+| 做法 | 效果 |
+|------|------|
+| 字符串全部字典编码，表里只存整数 | 专业名/校名/批次各存一份 |
+| 专业名规范化（源数据里带整段括号说明，最长 639 字符） | 字典从 65 万条降到 3.9 万条 |
+| 招生计划只留「代码映射」，学费/学制去重成单独小表 | 该表体积减半 |
+| 只建查询真正用到的索引 | 索引从 302 MB 降到约 40 MB |
+| Brotli 压缩后再随包 | 670 MB → 52 MB |
+
+> 从 **1.35 GB 原始 CSV** 到 **52 MB 随包文件**（约 1/26），零第三方依赖、单文件、可离线。
+> 想生成包含全部年份专业级数据的「完整版」，见开发者指南里的 `--min-year` 参数。
 
 **关于「智能推荐」的省份覆盖**
 
@@ -154,29 +170,41 @@ tools\setup-runtime.bat
 
 **已内置数据（随版本更新）**
 
-| 年份 | 已覆盖省份 | 记录数 |
-|------|-----------|--------|
-| 2026 | 见「数据管理」页实时显示 | — |
-| 2025 | 同上 | — |
-| 2024 | 同上 | — |
-| 2023 | 同上 | — |
+数据来自两个 MIT 协议的开源项目，已统一为一套格式：
 
-> 即使某省没有本地索引，「分数线查询」和「大学环境」功能依然**完全可用**（会实时联网获取）；
-> 「智能推荐」会自动快速抽样建库后给出结果。
+| 数据源 | 内容 | 覆盖 |
+|--------|------|------|
+| [choucisan/GaokaoCompass](https://github.com/choucisan/GaokaoCompass) | 一分一段表、院校投档线、专业录取分、招生计划、院校/专业代码 | **31 省 × 2017–2025，1133 万行** |
+| [lifefloating/gaokao-vault](https://github.com/lifefloating/gaokao-vault) | 2026 增量：一分一段、批次线、招生计划、专业库 | 2026 年增量 |
+
+| 表 | 行数（随包版本） |
+|----|-----------------|
+| 一分一段表 score_range | 201,120（2017–2025 全部） |
+| 院校投档线 school_adm | 756,505（2017–2025 全部） |
+| 专业录取分 major_adm | 1,670,718（2023–2025） |
+| 招生计划 plan_code | 1,781,239（2023–2025） |
+| 院校招生代码 school_code | 243,727 |
+| 院校主表 school | 5,315 所 |
+
+> 一分一段表与院校投档线保留**全部 2017–2025 年**；专业录取分与招生计划保留**近三年**
+> （推荐算法本身只用近三年，且这两张表占了 80% 体积）。需要全部年份可自行重建。
+
+> 即使某省某年缺本地数据，「分数线查询」和「大学环境」功能依然**完全可用**（会实时联网获取）。
 
 ---
 
 ## 三、数据说明
 
-| 项目 | 说明 |
-|------|------|
-| 分数线 / 招生计划 / 专业代码 | 掌上高考（`api.eol.cn`）公开接口 |
-| 一分一段表 | 中国教育在线（`gaokao.eol.cn` / `www.eol.cn`）转载的**各省官方发布表格** |
-| 大学环境 | colleges.chat 开源问卷（在校生匿名回答） |
-| AI 技能提示词 | [alchaincyf/zhangxuefeng-skill](https://github.com/alchaincyf/zhangxuefeng-skill)（MIT） |
-| 覆盖范围 | 全国 31 省 · 2991 所院校；一分一段表 45 张（2025/2026 共 20 省）；专业粒度索引 6 省（2026） |
-| 更新方式 | 每次查询自动缓存；「数据管理」页可触发后台批量补齐 |
-| 存储位置 | 全部在 `高考志愿助手\data\` 下，不上传任何个人数据 |
+| 项目 | 说明 | 协议 |
+|------|------|------|
+| 一分一段 / 投档线 / 专业录取分 / 招生计划 / 代码 | [choucisan/GaokaoCompass](https://github.com/choucisan/GaokaoCompass)（31 省 × 2017–2025，1133 万行） | MIT |
+| 2026 增量（一分一段 / 批次线 / 招生计划） | [lifefloating/gaokao-vault](https://github.com/lifefloating/gaokao-vault)（阳光高考 / 中国教育在线 / 大学生必备网） | Apache-2.0 |
+| 院校元信息（985/211/双一流/类型） | 掌上高考（`api.eol.cn`）公开接口 | — |
+| 大学环境 | [colleges.chat](https://cn.colleges.chat/) 开源问卷（在校生匿名回答） | — |
+| AI 技能提示词 | [alchaincyf/zhangxuefeng-skill](https://github.com/alchaincyf/zhangxuefeng-skill) | MIT |
+| 覆盖范围 | **31 省 × 2017–2025 全量**；一分一段 184 张省份-年份表；院校 5315 所 | — |
+| 存储方式 | 单文件 SQLite（`data/gaokao.db`），随包 Brotli 压缩为 `gaokao.db.gz`（约 52 MB） | — |
+| 存储位置 | 全部在 `高考志愿助手\data\` 下，不上传任何个人数据 | — |
 
 > 分数、位次等数据来自公开渠道，可能存在滞后或误差。**最终请以各省教育考试院和高校官方发布为准。**
 
@@ -192,13 +220,17 @@ tools\setup-runtime.bat
 ├─ server\             本地服务（静态托管 + 数据 API + 推荐引擎）
 ├─ web\                前端页面
 └─ data\
-   ├─ schools.json.gz   院校库（2991 所，压缩存放）
-   ├─ colleges.json.gz  大学环境数据（4585 所，压缩存放）
-   ├─ index\           分数线索引（按省-年）
+   ├─ gaokao.db.gz     统一数据源（Brotli 压缩的 SQLite，约 52 MB，首次启动自动解压）
+   ├─ schools.json.gz  院校元信息（985/211/双一流/类型）
+   ├─ colleges.json.gz 大学环境数据（4585 所，压缩存放）
+   ├─ rank_table.json.gz  中国教育在线一分一段表（备用数据源，含 2026 图文表）
+   ├─ index\           旧版分数线索引（仅在缺少 gaokao.db 时作为回退）
+   ├─ skill_zhangxuefeng.md  AI 技能提示词
    └─ cache\           查询缓存（可随时删除）
 ```
 
-**运行要求**：Windows 10 / 11（64 位），内存 4 GB 以上，约 120 MB 磁盘空间。
+**运行要求**：Windows 10 / 11（64 位），内存 4 GB 以上，约 200 MB 磁盘空间
+（程序约 100 MB，首次运行会额外解压出约 240 MB 的 `gaokao.db`）。
 
 ---
 
@@ -206,8 +238,53 @@ tools\setup-runtime.bat
 
 仓库不包含体积较大的抓取中间产物，可用 `tools/` 下的脚本重新生成。
 
+### 5.1 重建统一数据源（推荐路径）
+
 ```bash
-# 1. 院校基础库（2991 所）  -> data/raw/schools.json
+# 1. 取 GaokaoCompass 的文件清单（走 hf-mirror 镜像）
+node tools/build_gc_db.mjs --limit 1     # 首次会先生成 data/gc/filelist.json
+
+# 2. 全量下载并入库（861 个 CSV / 1.35 GB，边下边解析，不落原始 CSV）
+#    支持断点续跑：中断后重跑会跳过已完成文件
+node tools/build_gc_db.mjs --concurrency 6
+#    -> data/gc/gaokao.db（全字段，约 670 MB）
+
+# 3. 瘦身：专业名规范化 + 精简列 + 只留必要索引
+#    核心表（一分一段/投档线/院校代码）保留全部年份；
+#    --min-year 控制大表（专业录取分/招生计划）的起始年份
+node tools/slim_gcdb.mjs --min-year 2023
+#    -> data/gc/gaokao.slim.db（约 214 MB）
+#    想保留 2017-2025 全部专业级数据：node tools/slim_gcdb.mjs --min-year 0
+
+# 4. 压缩并安装到交付目录
+node tools/pack_gcdb.mjs --src data/gc/gaokao.slim.db \
+                         --out 高考志愿助手/data/gaokao.db.gz --level 9
+#    -> 约 52 MB（Brotli）；服务端首次启动自动解压
+```
+
+### 5.2 2026 增量（gaokao-vault）
+
+2026 年数据用 [lifefloating/gaokao-vault](https://github.com/lifefloating/gaokao-vault) 抓取：
+
+```bash
+git clone https://github.com/lifefloating/gaokao-vault.git && cd gaokao-vault
+uv sync --no-dev
+uv pip install tzdata                     # Windows 缺 IANA 时区库
+cp .env.example .env
+docker compose up -d db
+uv run gaokao-vault init-db
+
+# 只抓 2026 的一分一段表（走 eol.cn / dxsbb.com，纯 HTTP 不需要浏览器）
+GAOKAO_CRAWL__YEAR_START=2026 uv run gaokao-vault crawl -t score_segments
+```
+
+抓到的数据在 PostgreSQL 里，用 `docker compose exec db psql` 导出后按
+`tools/build_gc_db.mjs` 的表结构并入统一数据源即可。
+
+### 5.3 其他数据
+
+```bash
+# 院校基础库（2991 所）  -> data/raw/schools.json
 node tools/crawl.mjs schools
 
 # 2. 按省抓取录取数据       -> data/raw/province_<省ID>_<年份>.json
@@ -220,19 +297,19 @@ node tools/fetch_colleges.mjs
 # 4. 把问卷聚合成高校环境数据          -> data/bundle/colleges.json
 node tools/build_colleges.mjs
 
-# 5. 装配进交付目录（大数据自动 gzip） -> 高考志愿助手/data/
+# 5. 装配院校元信息与旧版索引          -> 高考志愿助手/data/
 node tools/build_bundle.mjs
 
-# 6. 一分一段表（真实数据，来源：中国教育在线）  -> data/resources/rank_table.json
+# 6. 2026 一分一段补充（备用数据源，含官方图片版清单） -> data/resources/rank_table.json
 node tools/crawl_resources.mjs rank --years 2026,2025
 node tools/crawl_resources.mjs verify      # 校验单调性 / 累计自洽 / 缺口
-
-# 7. 专业粒度索引（让志愿方案精确到专业）      -> data/index/special_<省>_<年>.json
-node tools/build_special_index.mjs --years 2026 --pages 220
 
 # 查看抓取进度
 node tools/crawl.mjs status
 ```
+
+> 统一数据源（`gaokao.db`）已取代 `data/index/special_*.json` 与
+> `build_special_index.mjs`；后者保留仅为兼容旧流程，新版不再需要。
 
 ### 自动化测试
 
@@ -254,10 +331,12 @@ node tools/render-test.mjs   # 前端渲染回归：32 项（在假 DOM 中真�
 | 文件 | 职责 |
 |------|------|
 | `高考志愿助手/server/server.mjs` | HTTP 服务入口、全部 API 路由、静态托管、端口自增、自动开浏览器 |
-| `高考志愿助手/server/data.mjs` | 数据层：院校库、投档线索引、专业索引、一分一段、大学环境、磁盘缓存 |
+| `高考志愿助手/server/data.mjs` | 基础数据层：院校库、大学环境、磁盘缓存、院校 ID 合并 |
+| `高考志愿助手/server/gcdb.mjs` | **统一数据源**：用内置 `node:sqlite` 读 `gaokao.db`（字典编码、省份 ID 换算、一分一段/投档线/专业分/代码查询） |
+| `高考志愿助手/server/gcsource.mjs` | 适配层：把 SQLite 适配成推荐引擎所需的索引结构，并在缺库时回退旧 JSON |
 | `高考志愿助手/server/upstream.mjs` | 上游代理：令牌桶限速、熔断退避、用户请求优先、失败不缓存 |
 | `高考志愿助手/server/indexer.mjs` | 索引构建：优先级队列、断点续爬、突发-休息节流、快速抽样 |
-| `高考志愿助手/server/resources.mjs` | 资料库：真实一分一段表查询、选科过滤、院校/专业代码 |
+| `高考志愿助手/server/resources.mjs` | 资料库：一分一段查询（新库优先、eol 回退）、选科过滤、院校/专业代码 |
 | `高考志愿助手/server/plan.mjs` | 志愿方案生成：冲稳保配额、院校/专业优先策略、专业粒度聚合 |
 | `高考志愿助手/server/recommend.mjs` | 冲稳保推荐引擎（线差法 + 位次法 + 正态概率模型） |
 | `高考志愿助手/server/ai.mjs` | AI 代理：注入张雪峰技能提示词、转发 OpenAI 兼容接口（含流式） |

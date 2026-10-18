@@ -88,8 +88,8 @@ async function startServer() {
     // ================= 资料库 =================
     head('F4 · 资料库（一分一段表 · 真实数据）');
     const rs = await j('/api/resource/status');
-    check('资料库已加载', rs.ok && rs.tables > 0, `${rs.tables} 张表 / ${rs.provinces} 个省 / ${rs.imageOnly} 条图片版`);
-    check('来源标注', /eol\.cn|教育在线/.test(rs.source || ''), rs.source);
+    check('资料库已加载', rs.ok !== false && rs.tables > 0, `${rs.tables} 张表 / ${rs.provinces} 个省`);
+    check('来源标注', /GaokaoCompass|eol\.cn|教育在线/.test(rs.source || ''), rs.source);
 
     const rlist = await j('/api/resource/rank/list');
     check('表清单', Array.isArray(rlist.tables) && rlist.tables.length > 0, `${rlist.tables.length} 组`);
@@ -99,7 +99,7 @@ async function startServer() {
     const rk = await j('/api/resource/rank?provinceId=44&type=' + encodeURIComponent('物理类') + '&score=600');
     check('分数→位次（真实表）', rk.ok && rk.rank > 0, `600 分 -> 位次 ${rk.rank}（${rk.year} ${rk.type}，考生 ${rk.total}）`);
     check('位次落在合理区间', rk.rank > 1000 && rk.rank < rk.total, `1 < ${rk.rank} < ${rk.total}`);
-    check('带原文链接', /^https?:\/\//.test(rk.url || ''), (rk.url || '').slice(0, 60));
+    check('带数据来源链接', /^https?:\/\//.test(rk.url || ''), (rk.url || '').slice(0, 60));
 
     const rk2 = await j('/api/resource/rank?provinceId=44&type=' + encodeURIComponent('物理类') + '&score=680');
     check('单调性（高分位次更靠前）', rk2.ok && rk2.rank < rk.rank, `680 分 -> ${rk2.rank} < 600 分 -> ${rk.rank}`);
@@ -121,9 +121,10 @@ async function startServer() {
     head('F5 · 资料库（院校代码 / 专业代码）');
     const codes = await j('/api/resource/codes?schoolId=104&provinceId=44&year=2025');
     check('院校国标代码', codes.nationalCode === '10558', `中山大学 = ${codes.nationalCode}`);
-    check('招生计划（含专业国标代码）', (codes.plan || []).length > 0, `${codes.plan?.length} 条`);
-    const clinical = (codes.plan || []).find((x) => x.majorCode === '100201K');
-    check('专业国标代码正确', !!clinical, clinical ? `${clinical.major} = ${clinical.majorCode}` : '未找到 100201K');
+    check('招生计划（含专业代码）', (codes.plan || []).length > 0, `${codes.plan?.length} 条，来源 ${codes.planSource || 'upstream'}`);
+    const clinical = (codes.plan || []).find((x) => /临床医学/.test(x.major || ''));
+    check('专业代码已补全', !!clinical && /^\d+[A-Z]?$/.test(clinical.majorCode || ''),
+      clinical ? `${clinical.major} = ${clinical.majorCode}（${codes.codeType || '省编专业代码'}）` : '未找到临床医学');
     check('招生计划含计划数/学费/学制', (codes.plan || []).some((x) => x.planNum && x.tuition), codes.plan?.[0] ? `${codes.plan[0].planNum} 人 / ${codes.plan[0].tuition} / ${codes.plan[0].length}` : '');
     check('省编专业代码', (codes.special || []).some((x) => x.provinceCode), `${codes.special?.length} 条专业线`);
     const tsinghua = await j('/api/resource/codes?schoolId=140&provinceId=11&year=2025');

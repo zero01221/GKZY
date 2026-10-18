@@ -75,18 +75,45 @@ export function loadSchools() {
     codeEnroll: s.code_enroll || '',
     logo: s.school_id ? `https://static-data.gaokao.cn/upload/logo/${s.school_id}.jpg` : '',
   })).filter((s) => s.id && s.name);
-  schoolById = new Map(schoolList.map((s) => [s.id, s]));
-
-  // 预建搜索索引
-  schoolSearchIndex = schoolList.map((s) => ({ s, key: normalize(s.name) }));
+  indexSchools();
   return schoolList.length;
 }
 
 const normalize = (t) => String(t || '').toLowerCase().replace(/\s+/g, '').replace(/[（）()·・\-—]/g, '');
 let schoolSearchIndex = [];
+let schoolByKey = new Map();      // 归一化名称 -> 院校记录
+
+function indexSchools() {
+  schoolById = new Map(schoolList.map((s) => [s.id, s]));
+  schoolSearchIndex = schoolList.map((s) => ({ s, key: normalize(s.name) }));
+  schoolByKey = new Map(schoolSearchIndex.map((x) => [x.key, x.s]));
+}
 
 export const getSchool = (id) => schoolById.get(Number(id)) || null;
 export const allSchools = () => schoolList;
+export const schoolByName = (name) => schoolByKey.get(normalize(name)) || null;
+
+/** 合并 GaokaoCompass 的院校主表：同名合并元数据，未收录的补进来（id 用 900000+gcid 避免冲突） */
+export function mergeGcSchools(gcSchools) {
+  const map = new Map();          // gcId -> appId
+  let added = 0;
+  for (const g of gcSchools) {
+    const hit = schoolByKey.get(normalize(g.name));
+    if (hit) { map.set(g.id, hit.id); continue; }
+    const id = 900000 + Number(g.id);
+    const rec = {
+      id, name: g.name, province: g.province || '', city: '', level: '',
+      type: '', nature: g.nature || '',
+      f985: (g.lv & 3) === 3, f211: (g.lv & 2) === 2, dual: '',
+      bgc: true, codeEnroll: '',
+    };
+    schoolList.push(rec);
+    map.set(g.id, id);
+    added++;
+  }
+  indexSchools();
+  return { map, added };
+}
 
 export function searchSchools({ q = '', province = '', level = '', type = '', dual = '', page = 1, size = 30, ids = null }) {
   let pool;
