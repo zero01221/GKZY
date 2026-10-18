@@ -161,6 +161,28 @@ async function startServer() {
     })).json();
     check('未填 Key 时给出提示', noKey.ok === false && /API Key/.test(noKey.message || ''), noKey.message);
 
+    head('F8 · 智能推荐含专业 + 数据管理数据源');
+    const recM = await j('/api/recommend?provinceId=44&type=' + encodeURIComponent('物理类') + '&score=600&major=' + encodeURIComponent('计算机'));
+    const recAll = [...(recM.tiers?.chong || []), ...(recM.tiers?.wen || []), ...(recM.tiers?.bao || [])];
+    check('推荐结果带专业', recAll.some((x) => (x.majors || []).length > 0),
+      `${recAll.filter((x) => (x.majors || []).length).length}/${recAll.length} 条含专业`);
+    const withCode = recAll.filter((x) => (x.majors || []).some((m) => m.code));
+    check('推荐专业带代码', withCode.length > 0, `${withCode.length} 条含专业代码`);
+    const hit = recAll.filter((x) => x.majorHit);
+    check('意向专业命中标记', hit.length > 0, `${hit.length} 条命中「计算机」`);
+    check('专业数据年份可追溯', recM.meta.majorData === true && recM.meta.majorDataYear > 2000, `${recM.meta.majorDataYear} 年`);
+
+    const st = await j('/api/status');
+    check('数据管理已切到新数据源', st.dataSource?.kind === 'sqlite',
+      st.dataSource?.kind === 'sqlite' ? `SQLite ${Math.round(st.dataSource.bytes / 1024 / 1024)} MB，${st.dataSource.years.min}-${st.dataSource.years.max}` : st.dataSource?.kind);
+    check('数据源各表行数可用', (st.dataSource?.tables || []).length >= 5,
+      (st.dataSource?.tables || []).map((t) => `${t.label}=${t.rows}`).join(' '));
+    check('逐年与逐省覆盖可用', (st.dataSource?.byYear || []).length > 0 && (st.dataSource?.provinces || []).length === 31,
+      `${st.dataSource?.byYear?.length} 年 / ${st.dataSource?.provinces?.length} 省`);
+    const hb = (st.dataSource?.provinces || []).find((p) => p.id === 13);
+    check('河北 2026 数据在位', hb && hb.has2026 === true,
+      hb ? `一分一段 ${hb.latestRank} / 投档线 ${hb.latestAdm} / 专业 ${hb.latestMajor}` : '未找到河北');
+
     head('边界与错误处理');
     const bad = await j('/api/recommend?provinceId=99&type=' + encodeURIComponent('综合') + '&score=600');
     check('非法省份给出提示', bad.ok === false && !!bad.message, bad.message?.slice(0, 40));

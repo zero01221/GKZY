@@ -15,6 +15,7 @@ import {
 } from './data.mjs';
 import {
   provinceIndex as loadProvinceIndex, indexedYears, batchLines as getBatchLines,
+  specialIndex as loadSpecialIndex, specialYears,
 } from './gcsource.mjs';
 import { schoolSpecialScores } from './upstream.mjs';
 
@@ -84,7 +85,13 @@ export async function recommend({ provinceId, type, score, rank, major = '', bat
       if (batchFilter && batchName && !batchName.includes(batchFilter)) continue;
       if (r[4] < 100) continue;
       const key = `${r[0]}#${r[2]}#${r[3]}`;
-      if (!units.has(key)) units.set(key, { schoolId: r[0], groupIdx: r[3], batchIdx: r[2], subjIdx: r[7], hist: [] });
+      if (!units.has(key)) {
+        units.set(key, {
+          schoolId: r[0], groupIdx: r[3], batchIdx: r[2], subjIdx: r[7],
+          groupName: (ix.dict.group || [])[r[3]] || '',
+          hist: [],
+        });
+      }
       const hist = units.get(key).hist;
       if (!hist.some((h) => h.year === y)) hist.push({ year: y, min: r[4], rank: r[5], line: r[6] });
     }
@@ -94,6 +101,30 @@ export async function recommend({ provinceId, type, score, rank, major = '', bat
     e.code = 'NO_DATA';
     throw e;
   }
+
+  // ---- 专业数据：让推荐精确到专业，而不只是学校 ----
+  const spYears = specialYears(pid).filter((y) => years.includes(y));
+  let spIdx = spYears.length ? loadSpecialIndex(pid, spYears[0]) : null;
+  if (spIdx && (!spIdx.rows || spIdx.rows.length < 20)) spIdx = null;
+  const majorsByUnit = new Map();       // `${schoolId}#${专业组名}` -> 专业数组
+  if (spIdx) {
+    const sti = (spIdx.dict.type || []).indexOf(typeName);
+    for (const r of spIdx.rows) {
+      if (sti >= 0 && r[2] !== sti) continue;
+      const bn = (spIdx.dict.batch || [])[r[3]] || '';
+      if (batchFilter && bn && !bn.includes(batchFilter)) continue;
+      const gname = (spIdx.dict.group || [])[r[4]] || '';
+      const k = `${r[0]}#${gname}`;
+      if (!majorsByUnit.has(k)) majorsByUnit.set(k, []);
+      majorsByUnit.get(k).push({
+        major: (spIdx.dict.major || [])[r[1]] || '',
+        code: (spIdx.dict.code || [])[r[9]] || '',
+        min: r[6], minRank: r[7],
+      });
+    }
+  }
+  const majorKey = String(major || '').replace(/\s/g, '');
+  const matchMajorName = (m) => !majorKey || String(m.major || '').replace(/\s/g, '').includes(majorKey);
 
   const batchLines = getBatchLines(pid, primaryYear);
   const batchLineOf = (batchName) => batchLines[`${typeName}|${batchName}`] || batchLines[`${typeName}|${batchFilter}`] || 0;
@@ -151,6 +182,7 @@ export async function recommend({ provinceId, type, score, rank, major = '', bat
     const latest = sorted[0];
     cands.push({
       schoolId: u.schoolId, groupIdx: u.groupIdx, batchIdx: u.batchIdx, subjIdx: u.subjIdx,
+      groupName: u.groupName,
       baseRank: baseRank == null ? null : Math.round(baseRank),
       baseDiff: baseDiff == null ? null : Math.round(baseDiff * 10) / 10,
       latestMin: latest.min, latestRank: latest.rank, latestYear: latest.year, latestLine: latest.line,
@@ -163,10 +195,20 @@ export async function recommend({ provinceId, type, score, rank, major = '', bat
 
   const tierOf = (p) => (p >= 0.80 ? 'bao' : p >= 0.45 ? 'wen' : 'chong');
   const tiers = { chong: [], wen: [], bao: [] };
-  for (const c of cands) tiers[tierOf(c.prob)].push(c);
-  tiers.chong.sort((a, b) => b.prob - a.prob);
-  tiers.wen.sort((a, b) => a.prob - b.prob);
-  tiers.bao.sort((a, b) => a.prob - b.prob);
+  for (const c of cands) {
+    // 挂上该专业组包含的专业（没有专业数据时为空数组）
+    const list = majorsByUnit.get(`${c.schoolId}#${c.groupName}`) || [];
+    c.majorOptions = list.slice().sort((a, b) => (b.min || 0) - (a.min || 0));
+    c.majorHit = majorKey ? c.majorOptions.some(matchMajorName) : false;
+    c.bestMajor = c.majorHit ? c.majorOptions.filter(matchMajorName)[0]
+      : (c.majorOptions[0] || null);
+    tiers[tierOf(c.prob)].push(c);
+  }
+  // 意向专业命中优先，其次按概率排序
+  const byMajorThen = (cmpProb) => (a, b) => (Number(b.majorHit) - Number(a.majorHit)) || cmpProb(a, b);
+  tiers.chong.sort(byMajorThen((a, b) => b.prob - a.prob));
+  tiers.wen.sort(byMajorThen((a, b) => a.prob - b.prob));
+  tiers.bao.sort(byMajorThen((a, b) => a.prob - b.prob));
 
   const per = Math.max(6, Math.ceil(limit / 3));
   const decorate = (c) => {
@@ -179,6 +221,15 @@ export async function recommend({ provinceId, type, score, rank, major = '', bat
       group: ix?.dict?.group?.[c.groupIdx] ?? '',
       batch: ix?.dict?.batch?.[c.batchIdx] ?? '',
       subjectReq: ix?.dict?.subj?.[c.subjIdx] ?? '',
+      // 专业粒度：该专业组下的具体专业（含专业代码与最低分）
+      majors: c.majorOptions.slice(0, 12).map((m) => ({
+        major: m.major, code: m.code, min: m.min, minRank: m.minRank,
+        hit: majorKey ? matchMajorName(m) : false,
+      })),
+      majorCount: c.majorOptions.length,
+      majorHit: c.majorHit,
+      bestMajor: c.bestMajor ? c.bestMajor.major : '',
+      bestMajorCode: c.bestMajor ? c.bestMajor.code : '',
       probability: Math.round(c.prob * 100),
       baseRank: c.baseRank,
       baseDiff: c.baseDiff,
@@ -202,6 +253,7 @@ export async function recommend({ provinceId, type, score, rank, major = '', bat
       baseLine, userDiff,
       primaryYear, refYears: years, batch: batchFilter || '全部',
       candidates: units.size,
+      majorData: !!spIdx, majorDataYear: spIdx ? spYears[0] : null,
     },
     tiers: {
       chong: tiers.chong.slice(0, per).map(decorate),
@@ -229,6 +281,7 @@ function buildReason(c, school, ctx) {
   if (c.years >= 3) r.push(`近 ${c.years} 年数据`);
   if (c.spread < 0.15) r.push('历年稳定');
   else r.push('历年波动较大');
+  if (c.majorHit) r.push('含意向专业');
   const h = c.hist;
   if (h.length >= 2) {
     const a = h[0], b = h[h.length - 1];

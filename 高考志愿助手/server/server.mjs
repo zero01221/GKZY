@@ -27,7 +27,7 @@ import {
 } from './resources.mjs';
 import { buildPlan } from './plan.mjs';
 import { skillInfo, chatProxy, EXTRACT_PROMPT } from './ai.mjs';
-import { source as gcsSource, info as gcsInfo, provinceTypes as gcsProvinceTypes, init as gcsInit } from './gcsource.mjs';
+import { source as gcsSource, info as gcsInfo, provinceTypes as gcsProvinceTypes, init as gcsInit, dataSource as gcsDataSource } from './gcsource.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = path.join(APP_DIR, 'web');
@@ -414,7 +414,15 @@ async function handleApi(req, res, url, body) {
   if (p === '/ai/chat') return chatProxy(q, res);
 
   // ---- 数据状态 / 同步 ----
-  if (p === '/status') return sendJson(res, { ok: true, indexer: indexerStatus(), coverage: coverage(), upstream: upstreamStatus() });
+  if (p === '/status') {
+    return sendJson(res, {
+      ok: true,
+      dataSource: gcsDataSource(),
+      indexer: indexerStatus(),
+      coverage: coverage(),
+      upstream: upstreamStatus(),
+    });
+  }
 
   if (p === '/sync') {
     let n = 0;

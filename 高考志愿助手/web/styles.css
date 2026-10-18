@@ -195,3 +195,19 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 .ai-input textarea:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(37,99,235,.12)}
 .aisettings{background:#f8fafc;border:1px solid var(--line);border-radius:10px;padding:12px;margin-top:12px}
 code{background:#f1f5f9;padding:1px 5px;border-radius:4px;font-size:12px}
+
+/* ---------------------------------------------------------------
+   智能推荐：卡片内的「推荐专业」标签
+   --------------------------------------------------------------- */
+.majors { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 6px; }
+.mlabel { font-size: 12px; color: var(--muted); font-weight: 600; margin-right: 2px; }
+.mchip {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 12px; line-height: 1.6; padding: 2px 9px;
+  border-radius: 999px; background: #f1f5f9; color: #334155;
+  border: 1px solid #e2e8f0; max-width: 320px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mchip i { font-style: normal; font-size: 11px; color: #94a3b8; }
+.mchip.hit { background: #dcfce7; color: #15803d; border-color: #bbf7d0; font-weight: 600; }
+.mchip.hit i { color: #15803d; opacity: .75; }

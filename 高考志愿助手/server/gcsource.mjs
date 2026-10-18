@@ -11,7 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  INDEX_DIR, PROVINCE_NAME, PROVINCE_ID, readJsonCached as readJson, mergeGcSchools,
+  INDEX_DIR, PROVINCES, PROVINCE_NAME, PROVINCE_ID, readJsonCached as readJson, mergeGcSchools,
 } from './data.mjs';
 import * as gc from './gcdb.mjs';
 
@@ -159,11 +159,21 @@ export function specialIndex(pid, year) {
     // 专业表本身没有省控线，用批次线表按「科类|批次」回填，便于线差法使用
     const bl = gc.batchLines(Number(pid), Number(year));
     const lineOf = (c, b) => bl[`${d.type[c]}|${d.batch[b]}`] || 0;
+    // 专业代码在瘦身库里被拆到 plan_code，这里回填 (sid,mid) -> 专业代码
+    const codeOf = new Map();
+    try {
+      for (const r of gc.raw().prepare(
+        'SELECT sid, mid, mcode FROM plan_code WHERE p=? AND y=? AND mcode>0',
+      ).all(gc.toDictPid(pid), Number(year))) {
+        const k = `${r.sid}#${r.mid}`;
+        if (!codeOf.has(k)) codeOf.set(k, r.mcode);
+      }
+    } catch { /* plan_code 缺失时忽略 */ }
     return {
       pid: Number(pid), province: gc.pnameOf(gc.toDictPid(pid)), year: Number(year), source: 'sqlite',
       dict: d,
       // 与原 special 索引行布局对齐：[schoolId, majorIdx, typeIdx, batchIdx, groupIdx, subjIdx, min, minRank, batchLine, codeIdx, catIdx, classIdx]
-      rows: rows.map((r) => [appSchoolId(r.sid), r.mid, r.c, r.b, r.grp, 0, r.min, r.rnk, lineOf(r.c, r.b), -1, -1, -1]),
+      rows: rows.map((r) => [appSchoolId(r.sid), r.mid, r.c, r.b, r.grp, 0, r.min, r.rnk, lineOf(r.c, r.b), codeOf.get(`${r.sid}#${r.mid}`) || -1, -1, -1]),
     };
   });
 }
@@ -232,4 +242,78 @@ export function init() {
   if (!HAVE_GC()) return { source: 'legacy-json' };
   const m = schoolMap();
   return { source: 'sqlite', schools: m.size };
+}
+
+/**
+ * 「数据管理」页需要的数据源全貌：
+ * 各表行数、逐年覆盖、逐省覆盖（有哪些年份的一分一段 / 投档线 / 专业分）
+ */
+let dsCache = null;
+export function dataSource() {
+  if (dsCache) return dsCache;
+  if (!HAVE_GC()) return { kind: 'legacy-json' };
+  gc.open();
+  const db = gc.raw();
+  const st = gc.stats();
+
+  const tables = [
+    { key: 'score_range', label: '一分一段表', rows: st.scoreRange, desc: '按分数查全省位次' },
+    { key: 'school_adm', label: '院校投档线', rows: st.schoolAdm, desc: '冲稳保推荐的核心' },
+    { key: 'major_adm', label: '专业录取分', rows: st.majorAdm, desc: '推荐精确到专业' },
+    { key: 'plan_code', label: '招生计划', rows: st.planCode, desc: '专业代码、计划数、学费' },
+    { key: 'school_code', label: '院校招生代码', rows: st.schoolCode, desc: '各省招生院校代码' },
+    { key: 'school', label: '院校主表', rows: st.schools, desc: '校名 / 省份 / 985·211' },
+  ];
+
+  // 逐年覆盖
+  const yearMap = new Map();
+  const bump = (y, key, rows, provs = 0) => {
+    if (!y) return;
+    if (!yearMap.has(y)) yearMap.set(y, { year: y });
+    const o = yearMap.get(y);
+    o[key] = rows;
+    if (provs) o[`${key}Provinces`] = provs;
+  };
+  for (const t of ['score_range', 'school_adm', 'major_adm', 'plan_code', 'school_code']) {
+    for (const r of db.prepare(`SELECT y, COUNT(*) c, COUNT(DISTINCT p) np FROM ${t} WHERE y > 0 GROUP BY y`).all()) {
+      bump(r.y, t, r.c, r.np);
+    }
+  }
+  const byYear = [...yearMap.values()].sort((a, b) => b.year - a.year);
+
+  // 逐省覆盖
+  const rankRows = new Map(), admRows = new Map(), majRows = new Map();
+  for (const r of db.prepare('SELECT p, y FROM score_range GROUP BY p, y').all()) {
+    if (!rankRows.has(r.p)) rankRows.set(r.p, []);
+    rankRows.get(r.p).push(r.y);
+  }
+  for (const r of db.prepare('SELECT p, y FROM school_adm GROUP BY p, y').all()) {
+    if (!admRows.has(r.p)) admRows.set(r.p, []);
+    admRows.get(r.p).push(r.y);
+  }
+  for (const r of db.prepare('SELECT p, y FROM major_adm GROUP BY p, y').all()) {
+    if (!majRows.has(r.p)) majRows.set(r.p, []);
+    majRows.get(r.p).push(r.y);
+  }
+  const provinces = PROVINCES.map(([pid, name]) => {
+    const dpid = gc.toDictPid(pid);
+    const ry = (rankRows.get(dpid) || []).sort((a, b) => b - a);
+    const ay = (admRows.get(dpid) || []).sort((a, b) => b - a);
+    const my = (majRows.get(dpid) || []).sort((a, b) => b - a);
+    return {
+      id: pid, name,
+      rankYears: ry, admYears: ay, majorYears: my,
+      latestRank: ry[0] || null, latestAdm: ay[0] || null, latestMajor: my[0] || null,
+      has2026: ry.includes(2026) || ay.includes(2026) || my.includes(2026),
+    };
+  });
+
+  dsCache = {
+    kind: 'sqlite',
+    bytes: st.bytes,
+    years: { min: st.years.a, max: st.years.b },
+    tables, byYear, provinces,
+    schoolCount: st.schools,
+  };
+  return dsCache;
 }

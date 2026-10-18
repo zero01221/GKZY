@@ -213,6 +213,25 @@ async function check(name, fn) {
     return `${html.length} 字符`;
   });
 
+  await check('recCard 显示推荐专业（不只学校）', () => {
+    const all = [...rec.tiers.chong, ...rec.tiers.wen, ...rec.tiers.bao];
+    const withMajor = all.find((x) => (x.majors || []).length);
+    if (!withMajor) throw new Error('推荐结果里没有任何专业数据');
+    const html = t.recCard(withMajor, 'chong', false);
+    if (!html.includes('推荐专业')) throw new Error('卡片未渲染「推荐专业」标签');
+    if (!html.includes(withMajor.majors[0].major)) throw new Error('卡片未渲染具体专业名');
+    if (!/mchip/.test(html)) throw new Error('未渲染专业 chip');
+    return `${withMajor.school.name} → ${withMajor.majors.slice(0, 3).map((m) => m.major).join('/')}`;
+  });
+
+  await check('推荐结果含专业代码与命中标记', () => {
+    const all = [...rec.tiers.chong, ...rec.tiers.wen, ...rec.tiers.bao];
+    const coded = all.filter((x) => (x.majors || []).some((m) => m.code));
+    if (!coded.length) throw new Error('没有任何专业代码');
+    const hit = all.filter((x) => x.majorHit);
+    return `${coded.length}/${all.length} 条带专业代码，${hit.length} 条命中意向专业`;
+  });
+
   // ★ 用户反馈的缺陷路径
   await check('showCampus 大学环境详情', async () => {
     t.showCampus('清华大学');
@@ -270,11 +289,22 @@ async function check(name, fn) {
 
   await check('renderData 数据管理页', async () => {
     t.renderData();
-    await sleep(1500);
+    // 首次 /api/status 要统计 200 万+ 行，给足时间（服务端已缓存，第二次很快就返回）
+    for (let i = 0; i < 20; i++) {
+      await sleep(500);
+      const h = registry.get('#d-result')?.innerHTML || '';
+      if (h && !h.includes('读取状态') && !h.includes('读取中')) break;
+    }
     const html = registry.get('#d-result')?.innerHTML || '';
     if (html.includes('undefined') || html.includes('NaN')) throw new Error('含 undefined/NaN');
-    if (!html.includes('本地索引覆盖')) throw new Error('缺少覆盖情况区块');
-    return `${html.length} 字符`;
+    // 新数据源应展示：数据源卡片 + 各表记录数 + 逐年覆盖 + 省份覆盖
+    if (!html.includes('数据源')) throw new Error('缺少数据源区块 >> ' + html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200));
+    if (!html.includes('SQLite')) throw new Error('未标注新数据源为 SQLite');
+    if (!html.includes('各表记录数')) throw new Error('缺少各表记录数');
+    if (!html.includes('逐年覆盖')) throw new Error('缺少逐年覆盖');
+    if (!html.includes('省份覆盖')) throw new Error('缺少省份覆盖');
+    if (!html.includes('一分一段表')) throw new Error('缺少一分一段表行');
+    return `${html.length} 字符，已展示新数据源`;
   });
 
   await check('边界：不存在的院校', async () => {

@@ -454,7 +454,8 @@ function recCard(c, tier, byRank) {
   const key = `r_${c.school.id}_${c.group}_${tier}`;
   const item = {
     key, type: '推荐', school: c.school.name, schoolId: c.school.id,
-    extra: `${c.group || ''} ${c.batch || ''} 概率${c.probability}%`,
+    major: c.bestMajor || '',
+    extra: `${c.group || ''} ${c.batch || ''} 概率${c.probability}%${c.bestMajor ? ' · ' + c.bestMajor : ''}`,
   };
   const h = c.hist || [];
   const spark = h.length > 1
@@ -466,11 +467,19 @@ function recCard(c, tier, byRank) {
         return `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.6"/>`;
       })()}</svg>`
     : '';
+  const mg = c.majors || [];
+  const majorsHtml = mg.length
+    ? `<div class="majors">
+        <span class="mlabel">推荐专业${c.majorCount > mg.length ? `（${mg.length}/${c.majorCount}）` : ''}</span>
+        ${mg.map((m) => `<span class="mchip${m.hit ? ' hit' : ''}" title="${esc(m.major)}${m.min ? ' · 最低 ' + m.min + ' 分' : ''}">${esc(m.major)}${m.code ? `<i>${esc(m.code)}</i>` : ''}</span>`).join('')}
+      </div>`
+    : '';
   return `<div class="rcard">
     <div class="rl1">
       <span class="sname">${esc(c.school.name)}</span>
       ${tierTag(c.school)}
       <span class="meta">${esc(c.school.province || '')}${c.school.city ? ' · ' + esc(c.school.city) : ''}</span>
+      ${c.majorHit ? '<span class="tag" style="background:#dcfce7;color:#15803d">意向专业命中</span>' : ''}
       <span class="spacer" style="margin-left:auto"></span>
       <button class="star ${isWished(key) ? 'on' : ''}" data-item='${esc(JSON.stringify(item))}' title="加入志愿表">☆</button>
     </div>
@@ -485,6 +494,7 @@ function recCard(c, tier, byRank) {
       <span class="meta">${esc(c.group || '')} ${esc(c.batch || '')} ${c.subjectReq ? '· ' + esc(c.subjectReq) : ''}</span>
       ${spark}
     </div>
+    ${majorsHtml}
     <div class="probbar"><i style="width:${c.probability}%;background:${color}"></i></div>
     <div class="reasons">${(c.reason || []).slice(0, 4).map((x) => `<span>${esc(x)}</span>`).join('')}</div>
   </div>`;
@@ -531,55 +541,147 @@ async function renderData() {
   box.innerHTML = loading('读取状态…');
   try {
     const r = await api('/status');
-    const cov = r.coverage || {};
-    const years = Object.keys(cov).sort((a, b) => b - a);
-    const idx = r.indexer;
+    const ds = r.dataSource || { kind: 'legacy-json' };
+    const idx = r.indexer || {};
     const up = r.upstream || {};
-    box.innerHTML = `
-    <div class="card">
-      <h2 class="h2">本地索引覆盖</h2>
-      ${years.length ? `<div class="tablewrap" style="margin-top:10px"><table>
-        <thead><tr><th>年份</th><th>已建省份</th><th>完整</th><th>记录数</th><th>覆盖度</th></tr></thead>
-        <tbody>${years.map((y) => {
-          const c = cov[y]; const pct = Math.round(c.provinces / 31 * 100);
-          return `<tr><td><b>${y}</b></td><td>${c.provinces} / 31</td><td>${c.complete}</td>
-            <td class="num">${fmt(c.rows)}</td>
-            <td style="min-width:180px"><div class="bar"><i style="width:${pct}%"></i></div>
-            <span class="hint" style="margin:0">${pct}%</span></td></tr>`;
-        }).join('')}</tbody></table></div>`
-        : '<div class="hint">尚无任何本地索引。点击右上角「补齐全部年份数据」开始后台抓取。</div>'}
-    </div>
-
-    <div class="card">
-      <div class="filters" style="align-items:center">
-        <h2 class="h2">后台同步任务</h2>
-        <span class="pill">${idx.running ? '运行中' : '空闲'}</span>
-        <span class="tag">队列 ${idx.queueLen}</span>
-        <span class="tag">已完成 ${idx.doneCount}</span>
-        <div class="spacer"></div>
-        <button class="btn sm" id="d-auto">刷新</button>
-      </div>
-      ${idx.current ? `<div class="hint">正在抓取：<b>${esc(idx.current.province)} ${idx.current.year}</b>
-        — ${fmt(idx.current.fetched)} / ${fmt(idx.current.total)} 条</div>
-        <div class="bar"><i style="width:${idx.current.total ? Math.round(idx.current.fetched / idx.current.total * 100) : 0}%"></i></div>` : ''}
-      ${idx.queueLen ? `<div class="hint">待处理：${idx.queue.slice(0, 24).map((x) => esc(x.province) + x.year).join('、')}${idx.queueLen > 24 ? ' …' : ''}</div>` : ''}
-      ${idx.recentDone?.length ? `<div class="hint">最近完成：${idx.recentDone.map((x) => `${esc(x.province)}${x.year}(${fmt(x.rows)}条${x.complete ? '' : '⚠'})`).join('、')}</div>` : ''}
-      ${idx.errors?.length ? `<div class="hint" style="color:#b45309">失败记录：${idx.errors.map((x) => `${esc(x.province)}${x.year}`).join('、')}（稍后会自动重试）</div>` : ''}
-    </div>
-
-    <div class="card">
-      <h2 class="h2">上游接口状态</h2>
-      <div class="statgrid" style="margin-top:10px">
-        <div class="stat"><div class="k">当前间隔</div><div class="v">${up.interval ?? '—'}<span style="font-size:12px">ms</span></div></div>
-        <div class="stat"><div class="k">总请求</div><div class="v">${fmt(up.req)}</div></div>
-        <div class="stat"><div class="k">成功</div><div class="v">${fmt(up.ok)}</div></div>
-        <div class="stat"><div class="k">被限流</div><div class="v">${fmt(up.limited)}</div></div>
-        <div class="stat"><div class="k">异常</div><div class="v">${fmt(up.bad)}</div></div>
-      </div>
-      <div class="hint">出现「被限流」时程序会自动降速并等待，属正常保护行为，不影响已抓取的数据。</div>
-    </div>`;
+    const main = ds.kind === 'sqlite' ? dataSourceCard(ds) : legacyCard(r.coverage || {});
+    box.innerHTML = main + syncCard(idx) + upstreamCard(up);
     $('#d-auto')?.addEventListener('click', renderData);
   } catch (e) { box.innerHTML = emptyBox('⚠️', '读取失败：' + esc(e.message)); }
+}
+
+/** 新数据源（SQLite）总览 */
+function dataSourceCard(ds) {
+  const mb = (n) => (n / 1024 / 1024).toFixed(0);
+  const gz = Math.round(ds.bytes / 4.6 / 1024 / 1024);   // brotli 后大致体积，仅作提示
+  const yMin = ds.years?.min, yMax = ds.years?.max;
+  const tbl = (ds.tables || []).map((t) => `<tr>
+      <td><b>${esc(t.label)}</b></td>
+      <td class="num">${fmt(t.rows)}</td>
+      <td class="hint" style="margin:0">${esc(t.desc || '')}</td></tr>`).join('');
+
+  const years = ds.byYear || [];
+  const yearRows = years.map((y) => `<tr>
+      <td><b>${y.year}</b></td>
+      <td class="num">${y.score_range ? `${y.score_rangeProvinces || 0} 省 / ${fmt(y.score_range)} 行` : '—'}</td>
+      <td class="num">${y.school_adm ? `${y.school_admProvinces || 0} 省 / ${fmt(y.school_adm)} 行` : '—'}</td>
+      <td class="num">${y.major_adm ? fmt(y.major_adm) : '—'}</td>
+      <td class="num">${y.plan_code ? fmt(y.plan_code) : '—'}</td>
+      <td class="num">${y.school_code ? fmt(y.school_code) : '—'}</td></tr>`).join('');
+
+  // 省份覆盖：标出最新年份，缺 2026 的灰显
+  const provRows = (ds.provinces || []).map((p) => {
+    const cell = (y) => (y ? `<b>${y}</b>` : '<span class="hint" style="margin:0">—</span>');
+    return `<tr>
+      <td>${esc(p.name)}</td>
+      <td>${cell(p.latestRank)}</td>
+      <td>${cell(p.latestAdm)}</td>
+      <td>${cell(p.latestMajor)}</td>
+      <td>${p.has2026 ? '<span class="tag tpub">有 2026</span>' : '<span class="hint" style="margin:0">—</span>'}</td></tr>`;
+  }).join('');
+  const with2026 = (ds.provinces || []).filter((p) => p.has2026).length;
+
+  return `
+  <div class="card">
+    <div class="filters" style="align-items:center">
+      <h2 class="h2">数据源</h2>
+      <span class="tag tpub">SQLite 单文件（内置 node:sqlite，离线可用）</span>
+      <div class="spacer"></div>
+      <button class="btn sm" id="d-auto">刷新</button>
+    </div>
+    <div class="statgrid" style="margin-top:12px">
+      <div class="stat"><div class="k">数据库大小</div><div class="v">${mb(ds.bytes)}<span style="font-size:12px"> MB</span></div></div>
+      <div class="stat"><div class="k">随包压缩版</div><div class="v">≈${gz}<span style="font-size:12px"> MB</span></div></div>
+      <div class="stat"><div class="k">年份范围</div><div class="v" style="font-size:20px">${yMin}–${yMax}</div></div>
+      <div class="stat"><div class="k">院校</div><div class="v">${fmt(ds.schoolCount)}</div></div>
+      <div class="stat"><div class="k">有 2026 的省</div><div class="v">${with2026}<span style="font-size:12px"> / 31</span></div></div>
+    </div>
+    <div class="hint">数据来自 <b>GaokaoCompass</b>（2017–2025，31 省）与 <b>gaokao-vault</b>（2026 抓取），
+      已统一为同一套表结构。全部离线可查，不需要联网同步。</div>
+  </div>
+
+  <div class="card">
+    <h2 class="h2">各表记录数</h2>
+    <div class="tablewrap" style="margin-top:10px"><table>
+      <thead><tr><th>表</th><th>行数</th><th>用途</th></tr></thead>
+      <tbody>${tbl}</tbody></table></div>
+  </div>
+
+  <div class="card">
+    <h2 class="h2">逐年覆盖</h2>
+    <div class="tablewrap" style="margin-top:10px;max-height:420px;overflow-y:auto"><table>
+      <thead><tr><th>年份</th><th>一分一段</th><th>院校投档线</th><th>专业录取分</th><th>招生计划</th><th>院校代码</th></tr></thead>
+      <tbody>${yearRows}</tbody></table></div>
+    <div class="hint">一分一段与院校投档线覆盖 2017–2025 全部 31 省；专业录取分与招生计划保留近年，用于专业级推荐与代码查询。</div>
+  </div>
+
+  <div class="card">
+    <h2 class="h2">省份覆盖（各表最新年份） <span class="pill">${(ds.provinces || []).length} 省</span></h2>
+    <div class="tablewrap" style="margin-top:10px;max-height:520px;overflow-y:auto"><table>
+      <thead><tr><th>省份</th><th>一分一段</th><th>投档线</th><th>专业录取分</th><th>2026</th></tr></thead>
+      <tbody>${provRows}</tbody></table></div>
+    <div class="hint">想补某省某年缺失数据，可在下方「后台补抓」里按需同步（会并入本地索引，不影响已有数据）。</div>
+  </div>`;
+}
+
+/** 旧数据源（JSON 索引）总览，仅在缺少 gaokao.db 时显示 */
+function legacyCard(cov) {
+  const years = Object.keys(cov).sort((a, b) => b - a);
+  return `
+  <div class="card">
+    <div class="filters" style="align-items:center">
+      <h2 class="h2">本地索引覆盖</h2>
+      <span class="tag" style="background:#fef3c7;color:#92400e">未找到 gaokao.db，回退到旧版 JSON 索引</span>
+      <div class="spacer"></div>
+      <button class="btn sm" id="d-auto">刷新</button>
+    </div>
+    ${years.length ? `<div class="tablewrap" style="margin-top:10px"><table>
+      <thead><tr><th>年份</th><th>已建省份</th><th>完整</th><th>记录数</th><th>覆盖度</th></tr></thead>
+      <tbody>${years.map((y) => {
+        const c = cov[y]; const pct = Math.round(c.provinces / 31 * 100);
+        return `<tr><td><b>${y}</b></td><td>${c.provinces} / 31</td><td>${c.complete}</td>
+          <td class="num">${fmt(c.rows)}</td>
+          <td style="min-width:180px"><div class="bar"><i style="width:${pct}%"></i></div>
+          <span class="hint" style="margin:0">${pct}%</span></td></tr>`;
+      }).join('')}</tbody></table></div>`
+      : '<div class="hint">尚无任何本地索引。把 gaokao.db.gz 放回 data 目录即可启用新数据源。</div>'}
+  </div>`;
+}
+
+/** 后台补抓任务 */
+function syncCard(idx) {
+  return `
+  <div class="card">
+    <div class="filters" style="align-items:center">
+      <h2 class="h2">后台补抓任务</h2>
+      <span class="pill">${idx.running ? '运行中' : '空闲'}</span>
+      <span class="tag">队列 ${idx.queueLen ?? 0}</span>
+      <span class="tag">已完成 ${idx.doneCount ?? 0}</span>
+    </div>
+    ${idx.current ? `<div class="hint">正在抓取：<b>${esc(idx.current.province)} ${idx.current.year}</b>
+      — ${fmt(idx.current.fetched)} / ${fmt(idx.current.total)} 条</div>
+      <div class="bar"><i style="width:${idx.current.total ? Math.round(idx.current.fetched / idx.current.total * 100) : 0}%"></i></div>` : ''}
+    ${idx.queueLen ? `<div class="hint">待处理：${(idx.queue || []).slice(0, 24).map((x) => esc(x.province) + x.year).join('、')}${idx.queueLen > 24 ? ' …' : ''}</div>` : ''}
+    ${idx.recentDone?.length ? `<div class="hint">最近完成：${idx.recentDone.map((x) => `${esc(x.province)}${x.year}(${fmt(x.rows)}条${x.complete ? '' : '⚠'})`).join('、')}</div>` : ''}
+    ${idx.errors?.length ? `<div class="hint" style="color:#b45309">失败记录：${idx.errors.map((x) => `${esc(x.province)}${x.year}`).join('、')}（稍后会自动重试）</div>` : ''}
+    <div class="hint">内置数据已覆盖 31 省 2017–2025，通常无需手动同步；这里用于补齐个别缺失的省份/年份。</div>
+  </div>`;
+}
+
+/** 上游接口状态 */
+function upstreamCard(up) {
+  return `
+  <div class="card">
+    <h2 class="h2">上游接口状态</h2>
+    <div class="statgrid" style="margin-top:10px">
+      <div class="stat"><div class="k">当前间隔</div><div class="v">${up.interval ?? '—'}<span style="font-size:12px">ms</span></div></div>
+      <div class="stat"><div class="k">总请求</div><div class="v">${fmt(up.req)}</div></div>
+      <div class="stat"><div class="k">成功</div><div class="v">${fmt(up.ok)}</div></div>
+      <div class="stat"><div class="k">被限流</div><div class="v">${fmt(up.limited)}</div></div>
+      <div class="stat"><div class="k">异常</div><div class="v">${fmt(up.bad)}</div></div>
+    </div>
+    <div class="hint">出现「被限流」时程序会自动降速并等待，属正常保护行为，不影响已抓取的数据。</div>
+  </div>`;
 }
 
 /* ---------------- 事件绑定 ---------------- */
