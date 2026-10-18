@@ -104,8 +104,12 @@ export async function recommend({ provinceId, type, score, rank, major = '', bat
 
   // ---- 专业数据：让推荐精确到专业，而不只是学校 ----
   const spYears = specialYears(pid).filter((y) => years.includes(y));
-  let spIdx = spYears.length ? loadSpecialIndex(pid, spYears[0]) : null;
-  if (spIdx && (!spIdx.rows || spIdx.rows.length < 20)) spIdx = null;
+  let spIdx = null, spYear = null;
+  for (const y of spYears) {
+    const idx = loadSpecialIndex(pid, y);
+    if (!idx || !idx.rows || idx.rows.length < 20) continue;
+    if (!spIdx || idx.rows.length > spIdx.rows.length) { spIdx = idx; spYear = y; }
+  }
   const majorsByUnit = new Map();       // `${schoolId}#${专业组名}` -> 专业数组
   if (spIdx) {
     const sti = (spIdx.dict.type || []).indexOf(typeName);
@@ -253,7 +257,7 @@ export async function recommend({ provinceId, type, score, rank, major = '', bat
       baseLine, userDiff,
       primaryYear, refYears: years, batch: batchFilter || '全部',
       candidates: units.size,
-      majorData: !!spIdx, majorDataYear: spIdx ? spYears[0] : null,
+      majorData: !!spIdx, majorDataYear: spIdx ? spYear : null,
     },
     tiers: {
       chong: tiers.chong.slice(0, per).map(decorate),

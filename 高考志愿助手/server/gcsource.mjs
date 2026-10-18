@@ -253,6 +253,22 @@ function legacySpecialYears(pid) {
   return out.sort((a, b) => b - a);
 }
 
+/**
+ * 在候选年份里挑「专业数据最全」的那一年。
+ * 不同来源覆盖度差异很大（例如某省 2026 只有抽样的两千行，2025 有四万多行），
+ * 不能简单取最新年份，否则专业粒度会大幅退化。
+ */
+export function pickSpecial(pid, years) {
+  let best = null;
+  for (const y of years) {
+    let idx = null;
+    try { idx = specialIndex(pid, y); } catch { idx = null; }
+    if (!idx || !idx.rows || !idx.rows.length) continue;
+    if (!best || idx.rows.length > best.idx.rows.length) best = { idx, year: y };
+  }
+  return best;
+}
+
 export function source() { return HAVE_GC() ? 'sqlite' : 'legacy-json'; }
 export function info() {
   if (!HAVE_GC()) return { source: 'legacy-json' };

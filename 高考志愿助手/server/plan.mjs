@@ -127,11 +127,18 @@ export async function buildPlan(opt) {
   }
 
   // ---------- 专业数据（可选） ----------
-  // 只有覆盖足够的专业索引才会被采用，避免「有索引但没几个专业」造成误导
+  // 只有覆盖足够的专业索引才会被采用，避免「有索引但没几个专业」造成误导；
+  // 同时在候选年份里挑数据最全的那一年（不是简单取最新年）
   const MIN_SPECIAL_ROWS = 200;
   const spYears = specialYears(pid).filter((y) => years.includes(y));
-  let spIdx = spYears.length ? loadSpecialIndex(pid, spYears[0]) : null;
-  if (spIdx && (!spIdx.rows || spIdx.rows.length < MIN_SPECIAL_ROWS)) spIdx = null;
+  let spPick = null;
+  for (const y of spYears) {
+    const idx = loadSpecialIndex(pid, y);
+    if (!idx || !idx.rows || idx.rows.length < MIN_SPECIAL_ROWS) continue;
+    if (!spPick || idx.rows.length > spPick.idx.rows.length) spPick = { idx, year: y };
+  }
+  let spIdx = spPick ? spPick.idx : null;
+  const spYear = spPick ? spPick.year : null;
   const majorsByUnit = new Map();     // `${schoolId}#${groupName}` -> [{major,code,min,minRank,prob}]
   if (spIdx) {
     const ti = spIdx.dict.type.indexOf(typeName);
@@ -317,7 +324,7 @@ export async function buildPlan(opt) {
       primaryYear, refYears: years,
       major: opt.major || '', total, quota,
       counts: { chong: pools.chong.length, wen: pools.wen.length, bao: pools.bao.length },
-      hasMajorData: !!spIdx, majorDataYear: spIdx ? spYears[0] : null,
+      hasMajorData: !!spIdx, majorDataYear: spIdx ? spYear : null,
       candidates: cands.length,
       generatedAt: new Date().toISOString(),
     },
