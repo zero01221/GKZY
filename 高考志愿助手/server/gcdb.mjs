@@ -92,6 +92,13 @@ export function open() {
   if (db) return db;
   if (!available()) throw new Error('未找到 gaokao.db（新数据源）。请先运行 tools/build_gc_db.mjs 生成，或放置 gaokao.db.gz');
   db = new DatabaseSync(GC_DB, { readOnly: true });
+  // 只读连接下 GROUP BY / DISTINCT 默认会去写临时文件，某些环境（无写权限的 Temp、
+  // 便携运行时目录）会直接报 “unable to open database file”。强制全部走内存。
+  try {
+    db.exec('PRAGMA temp_store = MEMORY');
+    db.exec('PRAGMA cache_size = -65536');
+    db.exec('PRAGMA query_only = ON');
+  } catch { /* 老版本不支持则忽略 */ }
   loadDicts();
   return db;
 }
