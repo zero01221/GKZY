@@ -83,12 +83,16 @@ function dicts() {
 // ------------------------------------------------------------------
 // 院校投档线索引
 // ------------------------------------------------------------------
-/** 该省有哪些年份有投档线数据 */
+/** 该省有哪些年份有投档线数据（合并 SQLite 与后台补抓出来的 JSON 索引） */
 export function indexedYears(pid) {
   if (!HAVE_GC()) return legacyIndexedYears(pid);
   return cached(`y_${pid}`, () => {
     gc.open();
-    return gc.raw().prepare('SELECT DISTINCT y FROM school_adm WHERE p=? ORDER BY y DESC').all(gc.toDictPid(pid)).map((r) => r.y);
+    const ys = new Set(gc.raw().prepare('SELECT DISTINCT y FROM school_adm WHERE p=? ORDER BY y DESC')
+      .all(gc.toDictPid(pid)).map((r) => r.y));
+    // 「数据管理」页的后台补抓会写 JSON 索引，这里一并算上，避免补抓了却看不到
+    for (const y of legacyIndexedYears(pid)) ys.add(y);
+    return [...ys].sort((a, b) => b - a);
   });
 }
 
@@ -100,7 +104,9 @@ export function provinceIndex(pid, year, { fresh = false } = {}) {
     const rows = gc.raw()
       .prepare('SELECT sid,c,b,grp,min,rnk,ctrl,subj FROM school_adm WHERE p=? AND y=?')
       .all(gc.toDictPid(pid), Number(year));
-    if (!rows.length) return null;
+    // SQLite 里没有该「省-年」时，回退到后台补抓写出的 JSON 索引
+    // （JSON 里已经是应用内的院校 id，可直接使用）
+    if (!rows.length) return readJson(path.join(INDEX_DIR, `province_${pid}_${year}.json`), null);
     const d = dicts();
     // 源数据里 school_adm 的省控线（control_score）大量为空，
     // 用一分一段/投档线汇总出的批次线按「科类|批次」回填，否则线差法无法使用
@@ -143,7 +149,10 @@ export function specialYears(pid) {
   if (!HAVE_GC()) return legacySpecialYears(pid);
   return cached(`sy_${pid}`, () => {
     gc.open();
-    return gc.raw().prepare('SELECT DISTINCT y FROM major_adm WHERE p=? ORDER BY y DESC').all(gc.toDictPid(pid)).map((r) => r.y);
+    const ys = new Set(gc.raw().prepare('SELECT DISTINCT y FROM major_adm WHERE p=? ORDER BY y DESC')
+      .all(gc.toDictPid(pid)).map((r) => r.y));
+    for (const y of legacySpecialYears(pid)) ys.add(y);
+    return [...ys].sort((a, b) => b - a);
   });
 }
 
@@ -154,7 +163,8 @@ export function specialIndex(pid, year) {
     const rows = gc.raw()
       .prepare('SELECT sid, mid, c, b, grp, min, rnk FROM major_adm WHERE p=? AND y=?')
       .all(gc.toDictPid(pid), Number(year));
-    if (!rows.length) return null;
+    // 同 provinceIndex：SQLite 无数据时回退到后台补抓的 JSON 索引
+    if (!rows.length) return readJson(path.join(INDEX_DIR, `special_${pid}_${year}.json`), null);
     const d = dicts();
     // 专业表本身没有省控线，用批次线表按「科类|批次」回填，便于线差法使用
     const bl = gc.batchLines(Number(pid), Number(year));
@@ -181,23 +191,34 @@ export function specialIndex(pid, year) {
 // ------------------------------------------------------------------
 // 批次线
 // ------------------------------------------------------------------
-export function batchLines(pid, year) {
-  if (!HAVE_GC()) {
-    const ix = readJson(path.join(INDEX_DIR, `province_${pid}_${year}.json`), null);
-    const out = {};
-    if (ix) {
-      const counter = new Map();
-      for (const r of ix.rows) {
-        const t = ix.dict.type[r[1]] || '-', b = ix.dict.batch[r[2]] || '-';
-        const k = `${t}|${b}`;
-        if (!counter.has(k)) counter.set(k, new Map());
-        const m = counter.get(k); m.set(r[6], (m.get(r[6]) || 0) + 1);
-      }
-      for (const [k, m] of counter) { const best = [...m.entries()].sort((a, b) => b[1] - a[1])[0]; if (best && best[0] > 0) out[k] = best[0]; }
-    }
-    return out;
+/** 从旧版 JSON 索引里归纳批次线（取该「科类|批次」下出现最多的非零值） */
+function legacyBatchLines(pid, year) {
+  const ix = readJson(path.join(INDEX_DIR, `province_${pid}_${year}.json`), null);
+  const out = {};
+  if (!ix) return out;
+  const counter = new Map();
+  for (const r of ix.rows) {
+    const t = (ix.dict.type || [])[r[1]] || '-', b = (ix.dict.batch || [])[r[2]] || '-';
+    const k = `${t}|${b}`;
+    if (!counter.has(k)) counter.set(k, new Map());
+    const m = counter.get(k);
+    m.set(r[6], (m.get(r[6]) || 0) + 1);
   }
-  return cached(`bl_${pid}_${year}`, () => gc.batchLines(Number(pid), Number(year)));
+  for (const [k, m] of counter) {
+    const best = [...m.entries()].sort((a, b) => b[1] - a[1])[0];
+    if (best && best[0] > 0) out[k] = best[0];
+  }
+  return out;
+}
+
+export function batchLines(pid, year) {
+  if (!HAVE_GC()) return legacyBatchLines(pid, year);
+  return cached(`bl_${pid}_${year}`, () => {
+    const fromDb = gc.batchLines(Number(pid), Number(year));
+    if (Object.keys(fromDb).length) return fromDb;
+    // SQLite 没有该「省-年」时（例如后台补抓出来的年份），回退到 JSON 索引
+    return legacyBatchLines(pid, year);
+  });
 }
 
 // ------------------------------------------------------------------
