@@ -32,7 +32,17 @@ const GC_ON = () => { try { return gc.available(); } catch { return false; } };
 function gcRankTable(pid, year, type) {
   const t = gc.rankTable(Number(pid), Number(year), type);
   if (!t || !t.series.length) return null;
-  return { province: t.province, year: t.year, type: type || t.type, series: t.series, range: t.range, total: t.total, gaps: t.gaps, full: t.full, url: 'https://huggingface.co/datasets/choucsan/Gaokao-Compass-11M', title: `GaokaoCompass · ${t.province} ${t.year} 年一分一段表`, control: t.control, source: 'GaokaoCompass' };
+  // GaokaoCompass 只到 2025 年，2026 及以后的行来自 gaokao-vault 抓取
+  const src = t.year >= 2026 ? 'gaokao-vault' : 'GaokaoCompass';
+  return {
+    province: t.province, year: t.year, type: type || t.type,
+    series: t.series, range: t.range, total: t.total, gaps: t.gaps, full: t.full,
+    url: t.year >= 2026
+      ? 'https://github.com/lifefloating/gaokao-vault'
+      : 'https://huggingface.co/datasets/choucsan/Gaokao-Compass-11M',
+    title: `${src} · ${t.province} ${t.year} 年一分一段表`,
+    control: t.control, source: src,
+  };
 }
 
 export function loadRankTables() {
@@ -100,7 +110,7 @@ export function availableRank(pid) {
   if (GC_ON()) {
     for (const r of gc.rankYears(Number(pid))) {
       const k = `${r.year}_${r.type}`;
-      if (!seen.has(k)) { seen.add(k); out.push({ year: r.year, type: r.type, source: 'GaokaoCompass' }); }
+      if (!seen.has(k)) { seen.add(k); out.push({ year: r.year, type: r.type, source: r.year >= 2026 ? 'gaokao-vault' : 'GaokaoCompass' }); }
     }
   }
   loadRankTables();
