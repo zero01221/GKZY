@@ -2,6 +2,8 @@
 chcp 65001 >nul 2>nul
 title 高考志愿助手
 cd /d "%~dp0"
+REM Security note: credentials admin/123456 are hardcoded; session is in-memory only.
+REM For personal local use only. Do not deploy on public networks.
 
 echo.
 echo   ============================================

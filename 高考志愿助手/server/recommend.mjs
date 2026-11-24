@@ -18,6 +18,19 @@ import {
   specialIndex as loadSpecialIndex, specialYears,
 } from './gcsource.mjs';
 import { schoolSpecialScores } from './upstream.mjs';
+import * as quality from './quality.mjs';
+
+/**
+ * 参考年份：默认排除抽样 / 部分 / 缺失年份（U4 决策「保留+标注+默认排除」）。
+ * 仅改变喂给算法的年份集合，WEIGHTS / normalCdf / tierOf / σ / 分档阈值一律不动。
+ * 若质量模块无可用年份（极端稀疏库），回退到原有 indexedYears 保证不崩。
+ */
+function referenceYears(pid, maxYears = 3) {
+  const usable = quality.usableYears(pid, maxYears);
+  if (usable.length) return usable;
+  const nowY = quality.gaokaoYear();
+  return indexedYears(pid).filter((y) => y <= nowY + 1).slice(0, maxYears);
+}
 
 const WEIGHTS = [1.0, 0.7, 0.5, 0.35, 0.2];
 
@@ -30,11 +43,6 @@ function normalCdf(z) {
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const mean = (a) => a.reduce((x, y) => x + y, 0) / a.length;
 const std = (a) => (a.length > 1 ? Math.sqrt(a.reduce((s, x) => s + (x - mean(a)) ** 2, 0) / (a.length - 1)) : 0);
-
-function referenceYears(pid, maxYears = 3) {
-  const nowY = new Date().getFullYear();
-  return indexedYears(pid).filter((y) => y <= nowY + 1).slice(0, maxYears);
-}
 
 export async function recommend({ provinceId, type, score, rank, major = '', batch = '', limit = 45, year = null }) {
   const pid = Number(provinceId);
@@ -104,11 +112,43 @@ export async function recommend({ provinceId, type, score, rank, major = '', bat
 
   // ---- 专业数据：让推荐精确到专业，而不只是学校 ----
   const spYears = specialYears(pid).filter((y) => years.includes(y));
-  let spIdx = null, spYear = null;
+  // 组名兼容键：majorsByUnit 以 `${schoolId}#${专业组名}` 为键，候选单元也必须用同一口径。
+  // 旧年份（如北京 2022）的专业组名是 1.0/2.0，而投档线组名是（01）/（03），
+  // 只按有效行数选年会选中这类不兼容年份，导致专业粒度静默丢失。
+  const unitGroupKeys = new Set([...units.values()].map((u) => `${u.schoolId}#${u.groupName}`));
+  let spIdx = null, spYear = null, spEffective = 0, spMatchCount = 0;
   for (const y of spYears) {
     const idx = loadSpecialIndex(pid, y);
     if (!idx || !idx.rows || idx.rows.length < 20) continue;
-    if (!spIdx || idx.rows.length > spIdx.rows.length) { spIdx = idx; spYear = y; }
+    // 按「能通过当前批次过滤的有效行数」挑选，而不是按总行数。
+    // 旧年份批次名可能是「本科」而当前 batchFilter 是「本科批」：
+    // 若按总行数选中这类年份，下面所有专业行都会被批次过滤清空，专业粒度静默丢失。
+    const batchRows = batchFilter
+      ? idx.rows.filter((r) => {
+          const bn = (idx.dict?.batch || [])[r[3]] || '';
+          return !bn || bn.includes(batchFilter);
+        })
+      : idx.rows;
+    const effective = batchRows.length;
+    if (effective < 20) continue;
+    // 与下方 majorsByUnit 完全同口径地统计「能对上候选单元」的不同组键数（去重）。
+    const sti = (idx.dict?.type || []).indexOf(typeName);
+    const matched = new Set();
+    for (const r of batchRows) {
+      if (sti >= 0 && r[2] !== sti) continue;
+      const k = `${r[0]}#${(idx.dict?.group || [])[r[4]] || ''}`;
+      if (unitGroupKeys.has(k)) matched.add(k);
+    }
+    const matchCount = matched.size;
+    // 组名兼容的年份优先，兼容度相同时再比有效行数；全部不兼容时回退原 effective 逻辑。
+    const compatible = matchCount > 0;
+    const bestCompatible = spMatchCount > 0;
+    if (!spIdx
+      || (compatible && !bestCompatible)
+      || (compatible === bestCompatible
+        && (matchCount > spMatchCount || (matchCount === spMatchCount && effective > spEffective)))) {
+      spIdx = idx; spYear = y; spEffective = effective; spMatchCount = matchCount;
+    }
   }
   const majorsByUnit = new Map();       // `${schoolId}#${专业组名}` -> 专业数组
   if (spIdx) {
@@ -258,6 +298,15 @@ export async function recommend({ provinceId, type, score, rank, major = '', bat
       primaryYear, refYears: years, batch: batchFilter || '全部',
       candidates: units.size,
       majorData: !!spIdx, majorDataYear: spIdx ? spYear : null,
+      // 统一质量字段（与志愿方案口径对齐，禁止各层自造 estimated/sampled 语义）
+      rankSource: useRank ? 'user' : 'none',
+      rankEstimated: false,
+      sampled: false,
+      historyFallback: quality.gaokaoYear() > (years[0] ?? quality.gaokaoYear()),
+      fallbackYears: quality.gaokaoYear() - (years[0] ?? quality.gaokaoYear()),
+      refYearStates: Object.fromEntries(years.map((y) => [y, quality.coverage({ pid, year: y }).cells
+        .find((c) => c.table === 'school_adm')?.state || 'missing'])),
+      dataQuality: quality.snapshot(pid, { refYears: years, rankSource: useRank ? 'user' : 'none' }),
     },
     tiers: {
       chong: tiers.chong.slice(0, per).map(decorate),

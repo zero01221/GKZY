@@ -1,0 +1,67 @@
+sequenceDiagram
+    actor U as 用户
+    participant A as app.js
+    participant R as rank-ui.js
+    participant C as college-ui.js
+    participant S as server.mjs
+    participant E as explore.mjs
+    participant G as gcdb.mjs(raw 只读)
+
+    Note over U,G: 流程一：一分一档表（R1/R2）
+    U->>A: 点击「一分一档表」(data-tab=rank)
+    A->>R: RankUI.render()
+    R->>S: GET /api/score-range/years?provinceId=13
+    S->>E: scoreRangeYears(13)
+    E->>G: SELECT DISTINCT y,c FROM score_range(p=18)
+    G-->>E: [(2026,3),(2025,3),(2025,4)...]
+    E-->>S: [{year,types}] (categoryOf 归一化)
+    S-->>R: {ok:true, years}
+    R->>R: 渲染年份(默认2026)/科类(默认物理类)下拉
+    U->>R: 选 2026/物理类 → 查看完整表格
+    R->>S: GET /api/score-range/table?year=2026&type=物理类
+    S->>E: scoreRangeTable(13,2026,'物理类')
+    E->>G: SELECT score,cum,seg WHERE p=18,y=2026,c IN(0,3) ORDER BY score DESC
+    G-->>E: 560 行 (含 [140,350991,13])
+    E-->>S: {rows,count,total,gaps,full}
+    S-->>R: {ok:true,...}
+    R->>R: 渲染表格「分数/本段人数/累计人数」(降序)
+    U->>R: 输入 140 → 查位次
+    R->>S: GET /api/score-range/rank?...&score=140
+    S->>E: scoreRangeRank(...)
+    E-->>S: {seg:13, cum:350991, exact:true}
+    S-->>R: {ok:true,...}
+    R->>U: 展示累计位次 350991（精确）
+
+    Note over U,G: 流程二：院校查询三级（R3/R4）
+    U->>A: 点击「院校查询」(data-tab=score)
+    A->>C: CollegeUI.render() → showList()
+    C->>S: GET /api/colleges/admitted?provinceId=13&q=&page=1
+    S->>E: admittedColleges(13,q,1,30)
+    E->>G: major_adm JOIN school (p=18, name LIKE q)
+    G-->>E: 2542 所(含 id/name/nature/lv)
+    E-->>S: {total,page,items}
+    S-->>C: {ok:true,...}
+    C->>U: 一级：学校列表 + 搜索 + 加载更多
+    U->>C: 点击某校(id=208)
+    C->>S: GET /api/colleges/filters?schoolId=208
+    S->>E: collegeFilters(13,208)
+    E->>G: DISTINCT y/c/mid FROM major_adm WHERE sid=208,p=18
+    G-->>E: years[2025,2026]/types/majors
+    E-->>S: {regions:[河北], years, types, majors}
+    S-->>C: {ok:true,...}
+    C->>U: 二级：地区(固定河北)/年份(默认2025)/专业/科类
+    U->>C: 选 2025 → 查结果
+    C->>S: GET /api/colleges/majors?schoolId=208&year=2025
+    S->>E: collegeMajorRows(13,208,2025,...)
+    E->>G: major_adm LEFT JOIN plan_info ON sid+mid
+    G-->>E: {major,min,rnk,cnt}
+    E-->>S: items(planNum=cnt, 无 admit)
+    S-->>C: {ok:true,items}
+    C->>U: 三级：专业/最低分/位次/计划数（无录取人数列）
+
+    Note over U,G: 流程三：省控线（R7 方案A）
+    U->>A: 点击「河北省控线」
+    A->>S: LinesUI.render() → GET /api/lines?provinceId=13
+    S->>S: getStaticBatchLines(13,y) × 5 年
+    S-->>A: {years, data}(20 格全有值)
+    A->>U: 四列表 × 10 行，表头数据对齐

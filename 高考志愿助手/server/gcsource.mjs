@@ -14,8 +14,23 @@ import {
   INDEX_DIR, PROVINCES, PROVINCE_NAME, PROVINCE_ID, readJsonCached as readJson, mergeGcSchools,
 } from './data.mjs';
 import * as gc from './gcdb.mjs';
+import { STATE_LABEL } from './quality-core.mjs';
+import * as quality from './quality.mjs';
+import { getStaticBatchLines } from './province-lines.mjs';
 
 const HAVE_GC = () => gc.available();
+
+/** JSON 索引是否带抽样/未完成标记（只读文件头，成本低） */
+function jsonFlags(file) {
+  try {
+    const fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(2048);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    fs.closeSync(fd);
+    const head = buf.subarray(0, n).toString('utf8');
+    return { sampled: /"sampled"\s*:\s*true/.test(head), complete: !/"complete"\s*:\s*false/.test(head) };
+  } catch { return { sampled: false, complete: true }; }
+}
 
 /** GaokaoCompass 院校 id -> 应用内院校 id（同名合并；未收录的补入院校库） */
 let gcToApp = null;
@@ -212,6 +227,8 @@ function legacyBatchLines(pid, year) {
 }
 
 export function batchLines(pid, year) {
+  const curated = getStaticBatchLines(pid, year);
+  if (Object.keys(curated).length) return curated;   // 唯一真源优先
   if (!HAVE_GC()) return legacyBatchLines(pid, year);
   return cached(`bl_${pid}_${year}`, () => {
     const fromDb = gc.batchLines(Number(pid), Number(year));
@@ -332,25 +349,65 @@ export function dataSource() {
     if (!majRows.has(r.p)) majRows.set(r.p, []);
     majRows.get(r.p).push(r.y);
   }
+  // 2026 逐表四态：替换原来的 has2026 布尔 OR（会把「仅 1 省有抽样投档线」渲染成绿色「有 2026」）
+  const gy = quality.gaokaoYear();
+  const c26 = new Map();
+  try {
+    for (const c of quality.coverage({ year: gy }).cells) {
+      if (!c26.has(c.stdPid)) c26.set(c.stdPid, {});
+      c26.get(c.stdPid)[c.table] = { state: c.state, label: STATE_LABEL[c.state] || c.state, rows: c.rows, sampled: c.sampled };
+    }
+  } catch { /* 质量模块不可用时降级为不高估 */ }
+
   const provinces = PROVINCES.map(([pid, name]) => {
     const dpid = gc.toDictPid(pid);
     const ry = (rankRows.get(dpid) || []).sort((a, b) => b - a);
     const ay = (admRows.get(dpid) || []).sort((a, b) => b - a);
     const my = (majRows.get(dpid) || []).sort((a, b) => b - a);
+    const cov = c26.get(pid) || {};
+    const states = Object.values(cov).map((x) => x.state);
     return {
       id: pid, name,
       rankYears: ry, admYears: ay, majorYears: my,
       latestRank: ry[0] || null, latestAdm: ay[0] || null, latestMajor: my[0] || null,
-      has2026: ry.includes(2026) || ay.includes(2026) || my.includes(2026),
+      coverage2026: cov,
+      // 语义收窄：只有至少一张表是「官方完整」才算有当年数据
+      has2026: states.includes('full'),
+      has2026Partial: states.some((s) => s === 'partial' || s === 'imageOnly'),
     };
   });
 
   dsCache = {
     kind: 'sqlite',
     bytes: st.bytes,
-    years: { min: st.years.a, max: st.years.b },
+    years: { min: st.years.a, max: st.years.b, note: '全库范围，不代表任何省份的逐表截止年份' },
     tables, byYear, provinces,
     schoolCount: st.schools,
+    quality: {
+      dataVersion: quality.version().dataVersion,
+      builtAt: quality.version().builtAt,
+      gaokaoYear: gy,
+      baselineYear: quality.baselineYear(),
+      baked: quality.version().baked,
+      legend: quality.LEGEND,
+    },
   };
   return dsCache;
+}
+
+/** 使数据源缓存失效（后台补抓完成后调用），避免抽样结果污染覆盖统计 */
+export function invalidateDataSource() { dsCache = null; quality.invalidate(); }
+
+/** 供算法与 UI 标注：该省哪些年份是抽样 / 未完成的 JSON 索引 */
+export function sampledYears(pid) {
+  const out = [];
+  try {
+    for (const f of fs.readdirSync(INDEX_DIR)) {
+      const m = /^(province|special)_(\d+)_(\d+)\.json$/.exec(f);
+      if (!m || Number(m[2]) !== Number(pid)) continue;
+      const fl = jsonFlags(path.join(INDEX_DIR, f));
+      if (fl.sampled || !fl.complete) out.push(Number(m[3]));
+    }
+  } catch { /* ignore */ }
+  return [...new Set(out)].sort((a, b) => b - a);
 }

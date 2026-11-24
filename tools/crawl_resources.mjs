@@ -287,6 +287,29 @@ function normalizeAll() {
 // ===============================================================
 // 3. 校验（单调性 / 累计一致性 / 量级合理性）
 // ===============================================================
+/**
+ * 纯函数：校验一条一分一段序列 [[分数, 累计人数, 本段人数], ...]（分数降序）。
+ * 供 tools/verify_gcdb.mjs 复用，避免主库校验与备用文件校验规则漂移。
+ * @returns {{mono:boolean,sumCnt:number,endCum:number,diff:number,pass:boolean,errors:string[]}}
+ */
+export function verifyRankSeries(s) {
+  const errors = [];
+  if (!Array.isArray(s) || !s.length) return { mono: false, sumCnt: 0, endCum: 0, diff: 0, pass: false, errors: ['序列为空'] };
+  let mono = true;
+  for (let i = 1; i < s.length; i++) {
+    if (s[i][0] > s[i - 1][0]) { mono = false; errors.push(`分数非降序 @${i}`); }
+    if (s[i][1] < s[i - 1][1]) { mono = false; errors.push(`累计人数回退 @${i}`); }
+  }
+  const sumCnt = s.reduce((a, r) => a + (Number(r[2]) || 0), 0);
+  const endCum = Number(s[s.length - 1][1]) || 0;
+  const diff = Math.abs(sumCnt - endCum);
+  const consistent = diff <= Math.max(5, endCum * 0.002);
+  const scaleOk = endCum > 500;
+  if (!consistent) errors.push(`本段和与末累计差 ${diff} 超限`);
+  if (!scaleOk) errors.push(`末累计 ${endCum} 量级异常`);
+  return { mono, sumCnt, endCum, diff, pass: mono && consistent && scaleOk, errors };
+}
+
 function verify() {
   console.log('== 校验一分一段表 ==\n');
   const store = JSON.parse(fs.readFileSync(RANK_FILE, 'utf8'));
@@ -325,11 +348,15 @@ function status() {
   for (const y of Object.keys(byYear).sort((a, b) => b - a)) console.log(`    ${y}: ${byYear[y].size} 个省 -> ${[...byYear[y]].sort().join(' ')}`);
 }
 
-(async () => {
-  const cmd = process.argv[2] || 'status';
-  const argOf = (n, d) => { const i = process.argv.indexOf('--' + n); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; };
-  if (cmd === 'rank') { await crawlRank(argOf('years', '2026,2025').split(',').map(Number), argOf('index', '')); normalizeAll(); verify(); }
-  else if (cmd === 'normalize') { normalizeAll(); verify(); }
-  else if (cmd === 'verify') verify();
-  else status();
-})();
+// 仅在「直接执行本文件」时跑 CLI；被 tools/verify_gcdb.mjs import 时不产生副作用
+const IS_MAIN = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (IS_MAIN) {
+  (async () => {
+    const cmd = process.argv[2] || 'status';
+    const argOf = (n, d) => { const i = process.argv.indexOf('--' + n); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; };
+    if (cmd === 'rank') { await crawlRank(argOf('years', '2026,2025').split(',').map(Number), argOf('index', '')); normalizeAll(); verify(); }
+    else if (cmd === 'normalize') { normalizeAll(); verify(); }
+    else if (cmd === 'verify') verify();
+    else status();
+  })();
+}

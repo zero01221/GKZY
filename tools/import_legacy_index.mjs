@@ -13,6 +13,8 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
+import { appendProvenance, standardPid, SOURCE_URLS, SOURCE_LICENSE } from './lib/provenance.mjs';
+import { TABLE_SOURCE } from '../高考志愿助手/server/quality-core.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -156,6 +158,43 @@ if (WITH_RANK) {
 
 db.exec('COMMIT');
 try { db.exec('ANALYZE'); } catch { /* ignore */ }
+
+// ---- 开发侧溯源台账 ----
+// 河北 2026 的 province_/special_ 索引来自 eol.cn 后台抽样（Q6 定稿口径）：
+// 保留数据但必须标 sampled=true / complete=false，运行时默认排除。
+// 历史索引普遍带 complete:false（抓取器通用未完成标记），不代表主库抽样；
+// 与 verify_gcdb.mjs / quality.mjs 同口径：只对 > 2025 的当年索引生效。
+function headFlags(file) {
+  try {
+    const fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(4096);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    fs.closeSync(fd);
+    const head = buf.subarray(0, n).toString('utf8');
+    return { sampled: /"sampled"\s*:\s*true/.test(head), complete: !/"complete"\s*:\s*false/.test(head) };
+  } catch { return { sampled: false, complete: true }; }
+}
+const currentYear = YEAR > 2025;
+const admFlags = adm ? headFlags(admFile) : null;
+const spFlags = sp ? headFlags(spFile) : null;
+const admSampled = (PID === 13 && YEAR === 2026)
+  || (currentYear && !!admFlags && (admFlags.sampled || !admFlags.complete));
+const spSampled = (PID === 13 && YEAR === 2026)
+  || (currentYear && !!spFlags && (spFlags.sampled || !spFlags.complete));
+const writeProv = (table, rows, sampled) => {
+  if (!rows) return;
+  appendProvenance({
+    table, p: standardPid(PID), y: YEAR,
+    source: TABLE_SOURCE[table],
+    sourceUrl: SOURCE_URLS.eol, license: SOURCE_LICENSE.eol,
+    sampled, complete: !sampled, rows,
+  });
+};
+writeProv('school_adm', totalAdm, admSampled);
+writeProv('major_adm', totalMajor, spSampled);
+// 一分一段属官方发布，不随投档线/专业分标 sampled（与 verify_gcdb 口径一致）
+writeProv('score_range', totalRank, false);
+console.log(`  溯源台账 3 表 -> data/gc/provenance.json（河北 2026 抽样=${admSampled || spSampled}）`);
 
 console.log('\n== 校验 ==');
 for (const t of ['score_range', 'school_adm', 'major_adm']) {

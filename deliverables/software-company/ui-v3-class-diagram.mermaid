@@ -1,0 +1,113 @@
+classDiagram
+    class ScoreRangeRow {
+      +number score
+      +number cum
+      +number seg
+    }
+    class ScoreRangeTable {
+      +number year
+      +string type
+      +ScoreRangeRow[] rows
+      +number count
+      +number total
+      +number[][] gaps
+      +boolean full
+    }
+    class RankHit {
+      +number score
+      +number seg
+      +number cum
+      +boolean exact
+    }
+    class YearsOption {
+      +number year
+      +string[] types
+    }
+    class CollegeItem {
+      +number id
+      +string name
+      +string nature
+      +number lv
+    }
+    class CollegeFilters {
+      +CollegeItem school
+      +Region[] regions
+      +number[] years
+      +string[] types
+      +Major[] majors
+    }
+    class Region {
+      +number id
+      +string name
+    }
+    class Major {
+      +number id
+      +string name
+    }
+    class CollegeMajorRow {
+      +string major
+      +number min
+      +number rank
+      +number planNum
+      +string type
+      +string batch
+      +string group
+    }
+    class ExploreQueries {
+      +categoryOf(c) string
+      +codesOf(type) number[]
+      +scoreRangeYears(pid) YearsOption[]
+      +scoreRangeTable(pid, year, type) ScoreRangeTable
+      +scoreRangeRank(pid, year, type, score) RankHit
+      +admittedColleges(pid, q, page, size) object
+      +collegeFilters(pid, sid) CollegeFilters
+      +collegeMajorRows(pid, sid, year, type, major, page, size) object
+    }
+    class GcdbReadOnly {
+      +raw() DatabaseSync
+      +open() DatabaseSync
+      +toDictPid(pid) number
+      +cnameOf(id) string
+      +cidOf(name) number
+    }
+    class ServerRoutes {
+      +handleApi(req, res, url, body) void
+      +sendJson(res, obj, status) void
+    }
+    class RankUI {
+      +render() void
+      -loadYears() void
+      -loadTable() void
+      -queryRank() void
+    }
+    class CollegeUI {
+      +render() void
+      -showList() void
+      -showDetail(sid) void
+      -loadRows() void
+    }
+    class LinesUI {
+      +render() void
+      +setFilter(year, category) void
+      -draw(box) void
+    }
+    class ProvinceLines {
+      +Map HEBEI
+      +getStaticBatchLines(pid, year) object
+      +staticYears(pid) number[]
+    }
+
+    ScoreRangeTable "1" *-- "many" ScoreRangeRow
+    YearsOption "1" o-- "many" string
+    CollegeFilters "1" *-- "1" CollegeItem
+    CollegeFilters "1" *-- "1" Region
+    CollegeFilters "1" *-- "many" Major
+    CollegeMajorRow ..> Major : major name
+    ExploreQueries ..> GcdbReadOnly : 只读 raw()/字典
+    ExploreQueries ..> ScoreRangeTable : 产出
+    ExploreQueries ..> CollegeFilters : 产出
+    ServerRoutes ..> ExploreQueries : 6 个新路由
+    RankUI ..> ServerRoutes : /api/score-range/*
+    CollegeUI ..> ServerRoutes : /api/colleges/*
+    LinesUI ..> ServerRoutes : /api/lines
+    ServerRoutes ..> ProvinceLines : 省控线唯一真源

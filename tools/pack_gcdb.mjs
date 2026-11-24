@@ -10,6 +10,11 @@
  * 用法：
  *   node tools/pack_gcdb.mjs [--src data/gc/gaokao.db] [--out 高考志愿助手/data/gaokao.db.gz]
  *                            [--keep-years 2017-2025] [--drop-vocational]
+ *                            [--require-verified --report data/gc/quality_report.json]
+ *
+ * 发版门禁（T2/A4 最后一关）：
+ *   --require-verified 要求存在由 verify_gcdb.mjs --apply --fail-on ... 产出的通过报告，
+ *   且库内 data_manifest 的数据版本 / 内容指纹与报告一致，否则拒绝打包。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -26,10 +31,47 @@ const OUT = path.resolve(ROOT, argOf('out', '高考志愿助手/data/gaokao.db.g
 const KEEP_YEARS = String(argOf('keep-years', ''));
 const DROP_VOC = !!argOf('drop-vocational', false);
 const LEVEL = Number(argOf('level', 11));      // brotli 质量 0-11
+const REQUIRE_VERIFIED = !!argOf('require-verified', false);
+const REPORT = path.resolve(ROOT, String(argOf('report', 'data/gc/quality_report.json')));
+const REQUIRE_GATES = String(argOf('require-gates', 'A1,A2,A4,C1,C2,C3,C4,T2,RT'))
+  .split(',').map((s) => s.trim()).filter(Boolean);
 
 const mb = (n) => (n / 1024 / 1024).toFixed(1) + ' MB';
 
 if (!fs.existsSync(SRC)) { console.error('找不到源数据库：' + SRC); process.exit(1); }
+
+// ---- 0. 发版门禁：无有效验证结果即拒绝打包 ----
+if (REQUIRE_VERIFIED) {
+  const deny = (msg) => {
+    console.error(`\n发版门禁未通过：${msg}`);
+    console.error(`  请先运行：node tools/verify_gcdb.mjs --db ${SRC} --apply --fail-on ${REQUIRE_GATES.join(',')}\n`);
+    process.exit(1);
+  };
+  if (!fs.existsSync(REPORT)) deny(`找不到校验报告 ${REPORT}`);
+  let rp;
+  try { rp = JSON.parse(fs.readFileSync(REPORT, 'utf8')); }
+  catch (e) { deny(`校验报告无法解析：${e.message}`); }
+  if (rp.mode !== 'apply') deny('报告来自 audit-only，未执行 --apply 异常隔离与质量表烘焙');
+  if (rp.passed !== true) deny(`报告门禁未通过：${(rp.failedGates || []).join(',') || '未知原因'}`);
+  const missingGates = REQUIRE_GATES.filter((g) => !(rp.failOn || []).includes(g) || rp.gates?.[g] !== true);
+  if (missingGates.length) deny(`报告缺少有效门禁结果：${missingGates.join(',')}`);
+  if (rp.db && path.resolve(rp.db) !== SRC) deny(`报告对应 ${rp.db}，与本次源库 ${SRC} 不一致`);
+  const vdb = new DatabaseSync(SRC, { readOnly: true });
+  let row = null;
+  try { row = vdb.prepare('SELECT data_version, db_sha256 FROM data_manifest ORDER BY data_version DESC LIMIT 1').get(); }
+  catch { /* 表不存在 */ }
+  vdb.close();
+  if (!row?.data_version) deny('源库缺少 data_manifest，说明未烘焙质量表');
+  if (row.data_version !== rp.dataVersion) deny(`数据版本不一致：库=${row.data_version} 报告=${rp.dataVersion}`);
+  if (rp.checks?.db_sha256 && row.db_sha256 && rp.checks.db_sha256 !== row.db_sha256) {
+    deny('内容指纹不一致，源库在校验之后被改动过');
+  }
+  console.log(`\n== 0. 发版门禁（--require-verified）==`);
+  console.log(`  通过 · 报告 ${path.relative(ROOT, REPORT)} · 数据版本 ${row.data_version} · 门禁 ${REQUIRE_GATES.join(',')}`);
+} else {
+  console.log('\n[提示] 未启用 --require-verified：本次打包不校验质量门禁（仅建议本地调试使用）');
+}
+
 const before = fs.statSync(SRC).size;
 console.log(`源数据库 ${SRC}\n  大小 ${mb(before)}`);
 

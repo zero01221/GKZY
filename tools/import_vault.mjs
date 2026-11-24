@@ -13,6 +13,8 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
+import { appendProvenance, standardPid, SOURCE_URLS, SOURCE_LICENSE } from './lib/provenance.mjs';
+import { TABLE_SOURCE } from '../高考志愿助手/server/quality-core.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -124,6 +126,7 @@ for (let i = 1; i < segRows.length; i++) {
 }
 
 let inserted = 0, replaced = 0;
+const provInserted = new Map();   // 省名 -> 实际写入行数（供开发侧溯源台账）
 db.exec('BEGIN');
 for (const { prov, cat, rows } of groups.values()) {
   const pid = did('province', prov);
@@ -134,9 +137,25 @@ for (const { prov, cat, rows } of groups.values()) {
     if (!Number.isFinite(r.score) || !Number.isFinite(r.seg) || !Number.isFinite(r.cum)) continue;
     ins.run(pid, YEAR, cid, 0, 0, r.score, r.seg, r.cum);
     inserted++;
+    provInserted.set(prov, (provInserted.get(prov) || 0) + 1);
   }
 }
 db.exec('COMMIT');
+
+// ---- 开发侧溯源台账 ----
+// 2026 一分一段来自 gaokao-vault（官方当年增量，非抽样、非拟合）。
+// 只写 data/gc/provenance.json，不改动随包库；按 表|省|年|来源 幂等 upsert。
+for (const [prov, rows] of provInserted) {
+  const std = standardPid(prov);
+  if (!std) { console.log(`  溯源台账：省名无法归一，跳过 ${prov}`); continue; }
+  appendProvenance({
+    table: 'score_range', p: std, y: YEAR,
+    source: TABLE_SOURCE.score_range,
+    sourceUrl: SOURCE_URLS.vault, license: SOURCE_LICENSE.vault,
+    sampled: false, complete: true, rows,
+  });
+}
+console.log(`  溯源台账 ${provInserted.size} 个「省-年」单元格 -> data/gc/provenance.json`);
 
 // 清理缓存表（服务端按需重建）
 try { db.exec('ANALYZE'); } catch { /* ignore */ }

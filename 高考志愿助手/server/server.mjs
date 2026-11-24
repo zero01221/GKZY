@@ -27,7 +27,15 @@ import {
 } from './resources.mjs';
 import { buildPlan } from './plan.mjs';
 import { skillInfo, chatProxy, EXTRACT_PROMPT } from './ai.mjs';
-import { source as gcsSource, info as gcsInfo, provinceTypes as gcsProvinceTypes, init as gcsInit, dataSource as gcsDataSource } from './gcsource.mjs';
+import { source as gcsSource, info as gcsInfo, provinceTypes as gcsProvinceTypes, init as gcsInit, dataSource as gcsDataSource, invalidateDataSource } from './gcsource.mjs';
+import * as quality from './quality.mjs';
+import * as Auth from './auth.mjs';
+import * as store from './store.mjs';
+import { getStaticBatchLines, staticYears } from './province-lines.mjs';
+import {
+  scoreRangeYears, scoreRangeTable, scoreRangeRank,
+  admittedColleges, collegeFilters, collegeMajorRows,
+} from './explore.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = path.join(APP_DIR, 'web');
@@ -63,6 +71,16 @@ function sendText(res, text, status = 200, type = 'text/plain; charset=utf-8') {
 }
 const toNum = (v, d = 0) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
 
+/** 给所有「数据类」响应附加统一 dataQuality 信封（唯一真源，禁止各层自造字段） */
+function withQuality(res, payload, q, ctx = {}) {
+  if (!payload || typeof payload !== 'object' || payload.ok === false || payload.dataQuality) {
+    return sendJson(res, payload);
+  }
+  const pid = toNum(q.provinceId) || toNum(ctx.provinceId);
+  if (!pid) return sendJson(res, payload);
+  return sendJson(res, { ...payload, dataQuality: quality.snapshot(pid, ctx) });
+}
+
 // ---------------------------------------------------------------
 // API 路由
 // ---------------------------------------------------------------
@@ -70,13 +88,203 @@ async function handleApi(req, res, url, body) {
   const p = url.pathname.replace(/^\/api/, '');
   const q = { ...Object.fromEntries(url.searchParams.entries()), ...(body && typeof body === 'object' ? body : {}) };
 
+  // ---- 统一鉴权门禁：仅个人数据端点需要会话；/api/history POST 不鉴权（未登录生成也留档） ----
+  const needAuth = p === '/wishlist' || p.startsWith('/wishlist/')
+    || (p === '/history' && req.method === 'GET')
+    || /^\/history\/[^/]+$/.test(p)
+    || p === '/drafts' || /^\/drafts\/[^/]+$/.test(p);
+  if (needAuth && !Auth.requireAuth(req, res)) return;
+
+  // ---- 登录 / 会话 ----
+  if (p === '/login' && req.method === 'POST') {
+    const token = Auth.login(q.username, q.password);
+    if (!token) return sendJson(res, { ok: false, message: '账号或密码错误' }, 401);
+    Auth.setCookie(res, token);
+    return sendJson(res, { ok: true, user: Auth.USER });
+  }
+  if (p === '/logout' && req.method === 'POST') {
+    Auth.logout(Auth.getSession(req)?.token);
+    Auth.clearCookie(res);
+    return sendJson(res, { ok: true });
+  }
+  if (p === '/session' && req.method === 'GET') {
+    const s = Auth.getSession(req);
+    return sendJson(res, { ok: true, authenticated: !!s, user: s ? s.user : null });
+  }
+
+  // ---- 河北省控线（唯一真源 province-lines.mjs） ----
+  if (p === '/lines' && req.method === 'GET') {
+    const pid = toNum(q.provinceId);
+    if (!pid) return sendJson(res, { ok: false, message: '缺少 provinceId' }, 400);
+    const years = q.year ? [toNum(q.year)] : staticYears(pid);
+    const data = {};
+    for (const y of years) data[String(y)] = getStaticBatchLines(pid, y);
+    return sendJson(res, {
+      ok: true,
+      province: PROVINCE_NAME.get(pid) || String(pid),
+      provinceId: pid,
+      years,
+      categories: ['历史类', '物理类'],
+      batches: ['本科批', '专科批'],
+      data,
+    });
+  }
+
+  // ---- 探索：一分一档表（只读；科类归一化见 explore.mjs） ----
+  if (p === '/score-range/years' && req.method === 'GET') {
+    const pid = toNum(q.provinceId);
+    if (!pid) return sendJson(res, { ok: false, message: '缺少 provinceId' }, 400);
+    return sendJson(res, {
+      ok: true, province: PROVINCE_NAME.get(pid) || String(pid), provinceId: pid,
+      years: scoreRangeYears(pid),
+    });
+  }
+  if (p === '/score-range/table' && req.method === 'GET') {
+    const pid = toNum(q.provinceId);
+    if (!pid) return sendJson(res, { ok: false, message: '缺少 provinceId' }, 400);
+    if (!q.year || !q.type) return sendJson(res, { ok: false, message: '缺少 year 或 type' }, 400);
+    const table = scoreRangeTable(pid, toNum(q.year), q.type);
+    if (!table) return sendJson(res, { ok: false, message: '暂无数据' });
+    return sendJson(res, {
+      ok: true, province: PROVINCE_NAME.get(pid) || String(pid), provinceId: pid,
+      year: toNum(q.year), type: q.type, ...table,
+    });
+  }
+  if (p === '/score-range/rank' && req.method === 'GET') {
+    const pid = toNum(q.provinceId);
+    if (!pid) return sendJson(res, { ok: false, message: '缺少 provinceId' }, 400);
+    if (!q.year || !q.type || q.score == null || q.score === '') {
+      return sendJson(res, { ok: false, message: '缺少 year / type / score' }, 400);
+    }
+    const hit = scoreRangeRank(pid, toNum(q.year), q.type, toNum(q.score));
+    if (!hit) return sendJson(res, { ok: false, message: '暂无数据' });
+    return sendJson(res, { ok: true, year: toNum(q.year), type: q.type, score: toNum(q.score), ...hit });
+  }
+
+  // ---- 探索：院校查询三级（只读；校名 id 一律用 gcdb 库内 sid） ----
+  if (p === '/colleges/admitted' && req.method === 'GET') {
+    const pid = toNum(q.provinceId);
+    if (!pid) return sendJson(res, { ok: false, message: '缺少 provinceId' }, 400);
+    return sendJson(res, {
+      ok: true, ...admittedColleges(pid, q.q || '', toNum(q.page, 1), toNum(q.size, 30)),
+    });
+  }
+  if (p === '/colleges/filters' && req.method === 'GET') {
+    const pid = toNum(q.provinceId);
+    if (!pid) return sendJson(res, { ok: false, message: '缺少 provinceId' }, 400);
+    const sid = toNum(q.schoolId);
+    if (!sid) return sendJson(res, { ok: false, message: '缺少 schoolId' }, 400);
+    const filters = collegeFilters(pid, sid);
+    if (!filters) return sendJson(res, { ok: false, message: '院校不存在' }, 404);
+    return sendJson(res, { ok: true, ...filters });
+  }
+  if (p === '/colleges/majors' && req.method === 'GET') {
+    const pid = toNum(q.provinceId);
+    if (!pid) return sendJson(res, { ok: false, message: '缺少 provinceId' }, 400);
+    const sid = toNum(q.schoolId);
+    if (!sid) return sendJson(res, { ok: false, message: '缺少 schoolId' }, 400);
+    if (!q.year) return sendJson(res, { ok: false, message: '缺少 year' }, 400);
+    return sendJson(res, {
+      ok: true,
+      ...collegeMajorRows(pid, sid, toNum(q.year), q.type || '', q.major || '',
+        toNum(q.page, 1), toNum(q.size, 30)),
+    });
+  }
+
+  // ---- 收藏（服务端持久化） ----
+  if (p === '/wishlist' && req.method === 'GET') {
+    return sendJson(res, { ok: true, items: store.listWishlist() });
+  }
+  if (p === '/wishlist' && req.method === 'POST') {
+    if (!q.key && !q.schoolId) return sendJson(res, { ok: false, message: '缺少 key 或 schoolId' }, 400);
+    const result = store.addWishlist({
+      key: q.key, type: q.type, school: q.school, schoolId: q.schoolId,
+      year: q.year, extra: q.extra, major: q.major,
+    });
+    return sendJson(res, { ok: true, ...result });
+  }
+  if (p === '/wishlist' && req.method === 'DELETE') {
+    if (!q.key) return sendJson(res, { ok: false, message: '缺少 key' }, 400);
+    return sendJson(res, { ok: store.deleteWishlist(q.key) });
+  }
+  if (p === '/wishlist/import' && req.method === 'POST') {
+    const result = store.importWishlist(q.items);
+    return sendJson(res, { ok: true, ...result });
+  }
+  if (p === '/wishlist/clear' && req.method === 'POST') {
+    return sendJson(res, { ok: store.clearWishlist() });
+  }
+
+  // ---- 生成历史 ----
+  if (p === '/history' && req.method === 'GET') {
+    const items = store.listHistory().map((h) => ({
+      id: h.id, createdAt: h.createdAt, meta: h.meta, slotCount: h.slotCount,
+    }));
+    return sendJson(res, { ok: true, items });
+  }
+  if (p === '/history' && req.method === 'POST') {
+    if (!q.meta || !q.slots) return sendJson(res, { ok: false, message: '缺少 meta 或 slots' }, 400);
+    return sendJson(res, { ok: true, item: store.addHistory({ meta: q.meta, slots: q.slots, context: q.context }) });
+  }
+  const mHistory = /^\/history\/([^/]+)$/.exec(p);
+  if (mHistory) {
+    if (req.method === 'GET') {
+      const item = store.getHistory(mHistory[1]);
+      if (!item) return sendJson(res, { ok: false, message: '记录不存在' }, 404);
+      return sendJson(res, { ok: true, item });
+    }
+    if (req.method === 'DELETE') {
+      return sendJson(res, { ok: store.deleteHistory(mHistory[1]) });
+    }
+  }
+
+  // ---- 草稿箱 ----
+  if (p === '/drafts' && req.method === 'GET') {
+    return sendJson(res, { ok: true, items: store.listDrafts() });
+  }
+  if (p === '/drafts' && req.method === 'POST') {
+    return sendJson(res, { ok: true, item: store.addDraft({ name: q.name, rows: q.rows, sourceHistoryId: q.sourceHistoryId }) });
+  }
+  const mDraft = /^\/drafts\/([^/]+)$/.exec(p);
+  if (mDraft) {
+    if (req.method === 'GET') {
+      const item = store.getDraft(mDraft[1]);
+      if (!item) return sendJson(res, { ok: false, message: '草稿不存在' }, 404);
+      return sendJson(res, { ok: true, item });
+    }
+    if (req.method === 'PUT') {
+      const item = store.updateDraft(mDraft[1], { name: q.name, rows: q.rows });
+      if (!item) return sendJson(res, { ok: false, message: '草稿不存在' }, 404);
+      return sendJson(res, { ok: true, item });
+    }
+    if (req.method === 'DELETE') {
+      return sendJson(res, { ok: store.deleteDraft(mDraft[1]) });
+    }
+  }
+
   // ---- 元信息 ----
   if (p === '/meta') {
     const schools = allSchools();
     const gci = gcsInfo();
+    const v = quality.version();
     return sendJson(res, {
       ok: true,
-      version: '1.1.0',
+      version: '1.1.0', appVersion: '1.1.0',
+      // 数据版本元数据（原 version 仅为应用版本，容易与数据截止年份混淆）
+      dataVersion: v.dataVersion, builtAt: v.builtAt,
+      gaokaoYear: v.gaokaoYear, baselineYear: v.baselineYear,
+      dbSha256: v.dbSha256, qualityBaked: v.baked,
+      // 逐表「最新有数据年份 / 最新完整年份」，rows=0 的单元格不参与，避免全库年份冒充
+      tableMaxYears: Object.fromEntries(
+        ['score_range', 'school_adm', 'major_adm', 'plan_code'].map((t) => {
+          const cs = quality.coverage({ table: t }).cells.filter((c) => c.rows > 0);
+          if (!cs.length) return [t, { latestYear: null, latestCompleteYear: null }];
+          return [t, {
+            latestYear: Math.max(...cs.map((c) => c.year)),
+            latestCompleteYear: Math.max(0, ...cs.filter((c) => c.state === 'full' && c.year <= v.baselineYear).map((c) => c.year)) || null,
+            note: '全国范围，非某省截止年份；按省请查 /api/quality/freshness',
+          }];
+        })),
       schoolCount: schools.length,
       collegeCount: (loadColleges().schools || []).length,
       provinces: PROVINCES.map(([id, name]) => ({ id, name })),
@@ -86,14 +294,38 @@ async function handleApi(req, res, url, body) {
       now: new Date().toISOString(),
       dataSource: gci.source === 'sqlite' ? 'GaokaoCompass + gaokao-vault（SQLite）' : '掌上高考（本地 JSON 索引）',
       gc: gci.source === 'sqlite' ? {
-        years: `${gci.years.a}-${gci.years.b}`,
-        scoreRange: gci.scoreRange, schoolAdm: gci.schoolAdm,
-        majorAdm: gci.majorAdm, planCode: gci.planCode, schoolCode: gci.schoolCode,
+        // 不再用全库 MIN/MAX 冒充「数据已到某年」；逐表年份见 tableMaxYears / /api/quality/freshness
+        rows: { scoreRange: gci.scoreRange, schoolAdm: gci.schoolAdm, majorAdm: gci.majorAdm,
+          planCode: gci.planCode, schoolCode: gci.schoolCode },
         dbMB: Math.round(gci.bytes / 1024 / 1024),
       } : null,
       source: '掌上高考 / GaokaoCompass / 中国教育在线 / colleges.chat',
     });
   }
+
+  // ---- 数据质量：9 个只读端点（全部本地、零联网、零鉴权） ----
+  if (p === '/quality/manifest') return sendJson(res, { ok: true, ...quality.version(), legend: quality.LEGEND });
+  if (p === '/quality/coverage') return sendJson(res, quality.coverage({
+    pid: q.provinceId || null, year: q.year || null, table: q.table || null, gaokaoYear: q.gaokaoYear || null,
+  }));
+  if (p === '/quality/freshness') {
+    const pid = toNum(q.provinceId);
+    if (!pid) return sendJson(res, { ok: false, message: '缺少 provinceId' }, 400);
+    return sendJson(res, quality.freshness(pid, q.gaokaoYear || null));
+  }
+  if (p === '/quality/snapshot') {
+    const pid = toNum(q.provinceId);
+    if (!pid) return sendJson(res, { ok: false, message: '缺少 provinceId' }, 400);
+    const refYears = q.refYears ? String(q.refYears).split(',').map(Number).filter(Boolean) : [];
+    return sendJson(res, { ok: true, dataQuality: quality.snapshot(pid, { refYears }) });
+  }
+  if (p === '/quality/issues') return sendJson(res, quality.issues({
+    table: q.table || null, pid: q.provinceId || null, limit: Math.min(toNum(q.limit, 100), 500),
+  }));
+  if (p === '/quality/fields') return sendJson(res, quality.fields({ pid: q.provinceId || null, year: q.year || null }));
+  if (p === '/quality/gaps') return sendJson(res, quality.gaps({ pid: q.provinceId || null, year: q.year || null }));
+  if (p === '/quality/audit') return sendJson(res, quality.audit());
+  if (p === '/quality/report') return sendJson(res, quality.report());
 
   // ---- 字典 ----
   if (p === '/dict') {
@@ -252,11 +484,18 @@ async function handleApi(req, res, url, body) {
     if (!pid || !year) return sendJson(res, { ok: false, message: '缺少省份或年份' }, 400);
     if (q.score) {
       const rank = scoreToRank(pid, year, type, toNum(q.score));
-      return sendJson(res, { ok: rank != null, score: toNum(q.score), rank, year, type, estimated: true });
+      return withQuality(res, {
+        ok: rank != null, score: toNum(q.score), rank, year, type,
+        // 原实现写死 estimated:true；此处明确标注为「拟合估算」，并带 rankSource 供前端统一渲染
+        estimated: true, rankSource: 'estimated', rankEstimated: true,
+      }, q, { rankSource: 'estimated' });
     }
     if (q.rank) {
       const score = rankToScore(pid, year, type, toNum(q.rank));
-      return sendJson(res, { ok: score != null, score, rank: toNum(q.rank), year, type, estimated: true });
+      return withQuality(res, {
+        ok: score != null, score, rank: toNum(q.rank), year, type,
+        estimated: true, rankSource: 'estimated', rankEstimated: true,
+      }, q, { rankSource: 'estimated' });
     }
     return sendJson(res, { ok: false, message: '需要 score 或 rank' }, 400);
   }
@@ -270,7 +509,10 @@ async function handleApi(req, res, url, body) {
       limit: Math.min(toNum(q.limit, 45), 120), year: toNum(q.year) || null,
     };
     try {
-      return sendJson(res, await recommend(reqArgs));
+      const out = await recommend(reqArgs);
+      return withQuality(res, out, q, {
+        refYears: out.meta?.refYears, rankSource: out.meta?.rankSource,
+      });
     } catch (e) {
       // 缺索引时：先做一次「快速抽样建索引」（约 30 页），成功就立刻出结果；同时排队完整同步
       if ((e.code === 'NO_INDEX' || e.code === 'NO_DATA') && pid) {
@@ -283,7 +525,10 @@ async function handleApi(req, res, url, body) {
               out.meta.sampled = true;
               out.meta.notice = `本次结果基于「${new Date().getFullYear()} 年快速抽样数据」（${qi.rows || '已有'} 条），完整数据正在后台补齐，稍后刷新会更准确。`;
               enqueue(pid, y, 5); startIndexer();
-              return sendJson(res, out);
+              invalidateDataSource();   // 抽样结果不得污染覆盖统计（T5）
+              return withQuality(res, out, q, {
+                refYears: out.meta?.refYears, rankSource: out.meta?.rankSource, sampled: true,
+              });
             }
           } catch { /* 落到下面返回错误 */ }
         }
@@ -319,12 +564,23 @@ async function handleApi(req, res, url, body) {
   }
 
   // ---- 资料库：一分一段表（真实数据） ----
-  if (p === '/resource/status') return sendJson(res, { ok: true, ...resourceStatus() });
+  if (p === '/resource/status') {
+    const st = resourceStatus();
+    const v = quality.version();
+    return withQuality(res, {
+      ok: true, ...st,
+      // 来源不再只靠硬编码字符串，补上可读的数据版本 / 构建日期
+      dataVersion: v.dataVersion, builtAt: v.builtAt,
+      gaokaoYear: v.gaokaoYear, baselineYear: v.baselineYear,
+    }, q);
+  }
 
   if (p === '/resource/rank/list') {
+    const rs = resourceStatus();
     return sendJson(res, {
       ok: true, tables: listRankTables(), imageOnly: listImageOnly(),
-      source: resourceStatus().source, updatedAt: resourceStatus().updatedAt,
+      source: rs.source, sourceBasis: rs.sourceBasis,
+      sourceNote: rs.sourceNote, updatedAt: rs.updatedAt,
     });
   }
 
@@ -338,12 +594,12 @@ async function handleApi(req, res, url, body) {
         const av = availableRank(pid);
         return sendJson(res, { ok: false, message: av.length ? '未找到匹配的一分一段表' : `暂无「${PROVINCE_NAME.get(pid) || pid}」的一分一段表（官方可能仅以图片发布）`, available: av });
       }
-      return sendJson(res, { ok: true, mode: 'score2rank', score: toNum(q.score), ...r });
+      return withQuality(res, { ok: true, mode: 'score2rank', score: toNum(q.score), ...r, rankSource: 'official' }, q, { rankSource: 'official', rankYear: r.year || null });
     }
     if (q.rank) {
       const r = realRankToScore(pid, type, toNum(q.rank), toNum(q.year) || null);
       if (!r) return sendJson(res, { ok: false, message: '暂无该省一分一段表' });
-      return sendJson(res, { ok: true, mode: 'rank2score', rank: toNum(q.rank), ...r });
+      return withQuality(res, { ok: true, mode: 'rank2score', rank: toNum(q.rank), ...r, rankSource: 'official' }, q, { rankSource: 'official', rankYear: r.year || null });
     }
     if (q.year && type) {
       const t = getRankTable(pid, toNum(q.year), type);
@@ -352,6 +608,7 @@ async function handleApi(req, res, url, body) {
       const size = Math.min(toNum(q.size, 300), 2000);
       return sendJson(res, {
         ok: true, province: t.province, year: t.year, type: t.type, title: t.title, url: t.url,
+        source: t.source || null, sourceBasis: t.sourceBasis || null, sampled: t.sampled || 0,
         total: t.total, range: t.range, full: t.full, gaps: t.gaps, blocks: t.blocks,
         count: t.series.length, page, size,
         rows: t.series.slice((page - 1) * size, page * size),
@@ -396,7 +653,22 @@ async function handleApi(req, res, url, body) {
         total: toNum(q.total, 80),
         ratios: q.ratios || null,
       });
-      return sendJson(res, out);
+      // 生成成功后自动留档（含未登录用户）；留档失败不影响原生成结果
+      try {
+        store.addHistory({
+          meta: out.meta,
+          slots: out.slots,
+          context: {
+            provinceId: toNum(q.provinceId), type: q.type, score: toNum(q.score),
+            rank: toNum(q.rank), subjects: q.subjects, major: q.major,
+            strategy: q.strategy, total: toNum(q.total, 80),
+          },
+        });
+      } catch (e) { console.error('历史留档失败（不影响生成结果）：', e.message); }
+      return withQuality(res, out, q, {
+        refYears: out.meta?.refYears, rankSource: out.meta?.rankSource,
+        rankYear: out.meta?.rankYear, rankTableState: out.meta?.rankTableState,
+      });
     } catch (e) {
       const pid = toNum(q.provinceId);
       if ((e.code === 'NO_INDEX' || e.code === 'NO_DATA') && pid) {
@@ -411,16 +683,31 @@ async function handleApi(req, res, url, body) {
   // ---- AI 对话（张雪峰技能） ----
   if (p === '/ai/skill') return sendJson(res, { ok: true, ...skillInfo() });
   if (p === '/ai/extract-prompt') return sendJson(res, { ok: true, prompt: EXTRACT_PROMPT });
-  if (p === '/ai/chat') return chatProxy(q, res);
+  if (p === '/ai/chat') {
+    // 注入数据时效与质量上下文，避免 AI 把历史/估算数据说成当年官方值（A-P6）
+    const byName = q.profile?.省份 ? PROVINCE_ID.get(q.profile.省份) : null;
+    const pid = toNum(q.provinceId) || toNum(q.profile?.provinceId) || byName || 0;
+    const brief = pid ? quality.brief(pid) : null;
+    if (brief) q.profile = { ...(q.profile || {}), dataQuality: brief, provinceId: pid };
+    return chatProxy(q, res);
+  }
 
   // ---- 数据状态 / 同步 ----
   if (p === '/status') {
+    const ds = gcsDataSource();
     return sendJson(res, {
       ok: true,
-      dataSource: gcsDataSource(),
+      dataSource: ds,
       indexer: indexerStatus(),
       coverage: coverage(),
       upstream: upstreamStatus(),
+      quality: {
+        version: quality.version(),
+        coverageSummary: quality.coverage({}).summary,
+        roundTrip: quality.roundTrip(),
+        issuesCount: quality.issues({ limit: 1 }).total,
+        fieldStats: quality.fields().summary,
+      },
     });
   }
 
@@ -545,7 +832,6 @@ function listen(port, attempt = 0) {
     console.log(`   数据目录： ${APP_DIR}`);
     console.log('');
     console.log('   * 关闭此窗口即退出程序');
-    console.log('   * 数据来源：掌上高考 / colleges.chat（仅供学习参考）');
     console.log('');
     if (AUTO_OPEN) {
       try {

@@ -21,8 +21,17 @@ import {
   batchLines as getBatchLines,
 } from './gcsource.mjs';
 import { realScoreToRank, matchSubjects } from './resources.mjs';
+import * as quality from './quality.mjs';
 
 const WEIGHTS = [1.0, 0.7, 0.5, 0.35, 0.2];
+
+/** 参考年份：默认排除抽样 / 部分 / 缺失年份（U4），仅改变数据集合，数学不动 */
+function planYears(pid, maxYears = 3) {
+  const usable = quality.usableYears(pid, maxYears);
+  if (usable.length) return usable;
+  const nowY = quality.gaokaoYear();
+  return indexedYears(pid).filter((y) => y <= nowY + 1).slice(0, maxYears);
+}
 
 function normalCdf(z) {
   const t = 1 / (1 + 0.2316419 * Math.abs(z));
@@ -53,7 +62,7 @@ export async function buildPlan(opt) {
   const strategy = opt.strategy === 'major' ? 'major' : 'school';
   const total = clamp(Number(opt.total) || 80, 10, 120);
 
-  const years = indexedYears(pid).filter((y) => y <= new Date().getFullYear() + 1).slice(0, 3);
+  const years = planYears(pid, 3);
   if (!years.length) {
     const e = new Error(`本地暂无「${pname}」的投档线索引。请到「数据管理」页同步该省数据。`);
     e.code = 'NO_INDEX';
@@ -84,13 +93,18 @@ export async function buildPlan(opt) {
   // ---------- 考生定位 ----------
   const subjects = Array.isArray(opt.subjects) ? opt.subjects.filter(Boolean) : [];
   let userRank = Number(opt.rank) > 0 ? Number(opt.rank) : null;
-  let rankSource = userRank ? 'user' : '';
+  // 枚举：user | official | estimated | none；rankSourceLabel 保留旧中文串以兼容既有前端
+  let rankSource = userRank ? 'user' : 'none';
+  let rankSourceLabel = userRank ? '用户填写' : '';
+  let rankYear = null;
   if (!userRank && Number(opt.score) > 0) {
     const real = realScoreToRank(pid, typeName, opt.score, primaryYear);
-    if (real) { userRank = real.rank; rankSource = `一分一段表(${real.year})`; }
-    else {
+    if (real) {
+      userRank = real.rank; rankSource = 'official'; rankYear = real.year;
+      rankSourceLabel = `一分一段表(${real.year})`;
+    } else {
       const est = scoreToRank(pid, primaryYear, typeName, opt.score);
-      if (est) { userRank = est; rankSource = '拟合估算'; }
+      if (est) { userRank = est; rankSource = 'estimated'; rankSourceLabel = '拟合估算'; }
     }
   }
   if (!userRank) throw new Error('无法确定位次：请填写位次，或确认该省已有一分一段表/分数样本');
@@ -102,6 +116,8 @@ export async function buildPlan(opt) {
 
   // ---------- 采集招生单元（专业组） ----------
   const units = new Map();     // key: schoolId#batchIdx#groupIdx
+  // units 只存 groupIdx（各年份字典不同），另按年份还原组名，用于专业索引选年的兼容判定。
+  const schoolGroupNames = new Map();   // schoolId -> Set(专业组名)
   for (const y of years) {
     const ix = loadProvinceIndex(pid, y);
     if (!ix) continue;
@@ -116,6 +132,8 @@ export async function buildPlan(opt) {
       if (!matchSubjects(subj, subjects)) continue;
       const key = `${r[0]}#${r[2]}#${r[3]}`;
       if (!units.has(key)) units.set(key, { schoolId: r[0], batchIdx: r[2], groupIdx: r[3], subjIdx: r[7], hist: [] });
+      if (!schoolGroupNames.has(r[0])) schoolGroupNames.set(r[0], new Set());
+      schoolGroupNames.get(r[0]).add((ix.dict.group || [])[r[3]] || '');
       const h = units.get(key).hist;
       if (!h.some((x) => x.year === y)) h.push({ year: y, min: r[4], rank: r[5], line: r[6] });
     }
@@ -131,11 +149,43 @@ export async function buildPlan(opt) {
   // 同时在候选年份里挑数据最全的那一年（不是简单取最新年）
   const MIN_SPECIAL_ROWS = 200;
   const spYears = specialYears(pid).filter((y) => years.includes(y));
-  let spPick = null;
+  // 与 recommend.mjs 同口径：majorsByUnit 以 `${schoolId}#${专业组名}` 为键，
+  // 选年须保证专业组名与候选单元对得上，否则专业粒度会静默丢失。
+  const unitGroupKeys = new Set();
+  for (const [sid, names] of schoolGroupNames) {
+    for (const g of names) unitGroupKeys.add(`${sid}#${g}`);
+  }
+  let spPick = null, spEffective = 0, spMatchCount = 0;
   for (const y of spYears) {
     const idx = loadSpecialIndex(pid, y);
     if (!idx || !idx.rows || idx.rows.length < MIN_SPECIAL_ROWS) continue;
-    if (!spPick || idx.rows.length > spPick.idx.rows.length) spPick = { idx, year: y };
+    // 与 recommend.mjs 同口径：按「能通过批次过滤的有效行数」挑年份，
+    // 避免选中批次命名口径不同的旧年份导致专业粒度静默丢失。
+    const batchRows = batchFilter
+      ? idx.rows.filter((r) => {
+          const bn = (idx.dict?.batch || [])[r[3]] || '';
+          return !bn || bn.includes(batchFilter);
+        })
+      : idx.rows;
+    const effective = batchRows.length;
+    if (effective < MIN_SPECIAL_ROWS) continue;
+    const ti = (idx.dict?.type || []).indexOf(typeName);
+    const matched = new Set();
+    for (const r of batchRows) {
+      if (ti >= 0 && r[2] !== ti) continue;
+      const k = `${r[0]}#${(idx.dict?.group || [])[r[4]] || ''}`;
+      if (unitGroupKeys.has(k)) matched.add(k);
+    }
+    const matchCount = matched.size;
+    // 组名兼容的年份优先，兼容度相同时再比有效行数；全部不兼容时回退原 effective 逻辑。
+    const compatible = matchCount > 0;
+    const bestCompatible = spMatchCount > 0;
+    if (!spPick
+      || (compatible && !bestCompatible)
+      || (compatible === bestCompatible
+        && (matchCount > spMatchCount || (matchCount === spMatchCount && effective > spEffective)))) {
+      spPick = { idx, year: y }; spEffective = effective; spMatchCount = matchCount;
+    }
   }
   let spIdx = spPick ? spPick.idx : null;
   const spYear = spPick ? spPick.year : null;
@@ -319,7 +369,8 @@ export async function buildPlan(opt) {
     meta: {
       province: pname, provinceId: pid, type: typeName, typeOptions: typeList,
       subjects, strategy, strategyLabel: strategy === 'major' ? '专业优先' : '院校优先',
-      score: userScore, rank: userRank, rankSource,
+      score: userScore, rank: userRank, rankSource, rankSourceLabel,
+      rankEstimated: rankSource === 'estimated', rankYear,
       batchLine, userDiff, batch: batchFilter || '全部',
       primaryYear, refYears: years,
       major: opt.major || '', total, quota,
@@ -327,6 +378,16 @@ export async function buildPlan(opt) {
       hasMajorData: !!spIdx, majorDataYear: spIdx ? spYear : null,
       candidates: cands.length,
       generatedAt: new Date().toISOString(),
+      // 统一质量字段（与推荐引擎口径一致）
+      sampled: false,
+      historyFallback: quality.gaokaoYear() > (years[0] ?? quality.gaokaoYear()),
+      fallbackYears: quality.gaokaoYear() - (years[0] ?? quality.gaokaoYear()),
+      refYearStates: Object.fromEntries(years.map((y) => [y, quality.coverage({ pid, year: y }).cells
+        .find((c) => c.table === 'school_adm')?.state || 'missing'])),
+      dataQuality: quality.snapshot(pid, {
+        refYears: years, rankSource, rankEstimated: rankSource === 'estimated',
+        rankYear, rankTableState: rankSource === 'official' ? 'full' : null,
+      }),
     },
     slots,
     groups: { 冲: slots.filter((s) => s.tier === 'chong').length, 稳: slots.filter((s) => s.tier === 'wen').length, 保: slots.filter((s) => s.tier === 'bao').length },

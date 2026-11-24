@@ -1,0 +1,33 @@
+sequenceDiagram
+  autonumber
+  participant U as 考生/家长
+  participant W as plan-ui.js + quality-ui.js
+  participant S as server.mjs /api/plan
+  participant Q as quality.mjs 唯一真源
+  participant P as plan.mjs
+  participant G as gcsource.mjs / gcdb.mjs
+  participant D as gaokao.db 只读
+  participant X as CSV / 打印 / AI 上下文
+
+  U->>W: 选省份=河北 / 分数 / 选科, 点「一键生成」
+  W->>S: GET /api/plan?provinceId=13&score=600...
+  S->>Q: snapshot(pid, ctx)
+  Q->>D: SELECT data_manifest / coverage_cell / field_stats / gap_list
+  D-->>Q: 逐表最新年份 四态 字段非空率 缺口
+  Q-->>S: dataQuality 信封
+  S->>P: buildPlan(opt, dq)
+  P->>Q: usableYears(pid) 排除 partial/sampled 年份
+  Q->>D: SELECT ... FROM coverage_cell WHERE p=17
+  D-->>Q: 2026=partial(sampled) / 2025=full / 2024=full
+  Q-->>P: refYears=[2025,2024,2023], historyFallback=true, fallbackYears=1
+  P->>G: provinceIndex / specialIndex / realScoreToRank
+  G->>D: 只读查询（异常行已在构建期物理隔离）
+  D-->>G: rows + ctrlFilled{count,total,source}
+  G-->>P: ix{dict,rows,dq}
+  P->>P: 线差法/位次法 + Φ(z) 概率（数学逻辑一字不改）
+  P-->>S: {slots, meta{...dq, rankSource, sampled, historyFallback, refYearStates}}
+  S->>Q: withQuality 附加信封
+  S-->>W: JSON
+  W->>W: renderPlan 插入「数据快照条」+ 灰数据图例 + ⚠历史回退
+  W->>X: exportPlan 首行快照 / 打印页脚 / refreshAiProfile 注入
+  X-->>U: 「本次基于 2025 年历史数据 · 位次≈拟合 · 数据版本 2026.10.18-1 · ⚠历史回退 · ◐河北2026投档线为部分抽样」

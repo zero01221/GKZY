@@ -1,5 +1,5 @@
 /* =================================================================
- * 追加模块：志愿方案 / 资料库 / AI 助手
+ * 追加模块：志愿参考 / 资料库 / AI 助手
  * ================================================================= */
 
 /* ---------------- 通用 ---------------- */
@@ -8,9 +8,9 @@ const LEVEL_TAG = (s) => (s.f985 ? '<span class="tag t985">985</span>' : s.f211 
 const tierColor = (t) => (t === 'chong' ? 'var(--red)' : t === 'wen' ? 'var(--amber)' : 'var(--green)');
 
 /* =================================================================
- * 一、志愿方案
+ * 一、志愿参考
  * ================================================================= */
-const PLAN = { slots: [], meta: null };
+const PLAN = { slots: [], meta: null, dq: null };
 
 function renderSubjectChips() {
   const box = document.getElementById('p-subjects');
@@ -43,7 +43,7 @@ async function runPlan() {
   const ratios = (parts.length === 3 && parts.every(Number.isFinite) && parts.reduce((a, b) => a + b, 0) > 0)
     ? { chong: parts[0] / 100, wen: parts[1] / 100, bao: parts[2] / 100 } : null;
 
-  box.innerHTML = loading('正在生成志愿方案…（首次某省份可能需要联网取数）');
+  box.innerHTML = loading('正在生成志愿参考…（首次某省份可能需要联网取数）');
   try {
     const r = await api('/plan', {
       provinceId: pid, type, strategy, total,
@@ -54,6 +54,7 @@ async function runPlan() {
     if (!r.ok) { box.innerHTML = emptyBox('⚠️', esc(r.message)); return; }
     PLAN.slots = r.slots;
     PLAN.meta = r.meta;
+    PLAN.dq = r.dataQuality || null;
     renderPlan();
   } catch (e) {
     box.innerHTML = emptyBox('⚠️', '生成失败：' + esc(e.message));
@@ -66,14 +67,18 @@ function renderPlan() {
   if (!m) return;
   const g = { 冲: 0, 稳: 0, 保: 0 };
   PLAN.slots.forEach((s) => { g[s.tierLabel]++; });
+  // 统一数据快照条 + 打印页脚同步（脱离工具后仍可判断数据时效）
+  if (typeof QualityUI !== 'undefined') QualityUI.setSnapshot(PLAN.dq);
+  const snapBar = (typeof QualityUI !== 'undefined') ? QualityUI.snapshotBar(PLAN.dq) : '';
 
   box.innerHTML = `
+  ${snapBar}
   <div class="card">
     <div class="filters" style="align-items:center">
-      <h2 class="h2">志愿方案 <span class="pill">${PLAN.slots.length} 条</span></h2>
+      <h2 class="h2">志愿参考 <span class="pill">${PLAN.slots.length} 条</span></h2>
       <span class="tag">${esc(m.province)} · ${esc(m.type)}</span>
       ${m.score ? `<span class="tag">分数 <b>${m.score}</b></span>` : ''}
-      <span class="tag">位次 <b>${fmt(m.rank)}</b> <span class="meta">(${esc(m.rankSource || '')})</span></span>
+      <span class="tag">位次 <b>${fmt(m.rank)}</b> <span class="meta">(${esc(m.rankSourceLabel || m.rankSource || '')})</span></span>
       ${m.batchLine ? `<span class="tag">省控线 <b>${m.batchLine}</b> · 线差 <b>${m.userDiff > 0 ? '+' : ''}${m.userDiff}</b></span>` : ''}
       <span class="tag">${esc(m.strategyLabel)}</span>
       ${m.subjects && m.subjects.length ? `<span class="tag">选科 ${esc(m.subjects.join('/'))}</span>` : ''}
@@ -160,8 +165,9 @@ function exportPlan() {
   }
   rows.push([]);
   rows.push(['生成信息', `${m.province} ${m.type} ${m.score ? m.score + '分' : ''} 位次${m.rank} 线差${m.userDiff} 策略${m.strategyLabel} 参考年份${(m.refYears || []).join('/')}`]);
+  rows.push(['数据快照', snapshotForExport(PLAN.dq)]);
   const csv = '\uFEFF' + rows.map((r) => r.map((c) => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
-  download(`高考志愿方案_${m.province || ''}${m.score ? m.score + '分' : ''}_${new Date().toISOString().slice(0, 10)}.csv`, csv);
+  download(`高考志愿参考_${m.province || ''}${m.score ? m.score + '分' : ''}_${new Date().toISOString().slice(0, 10)}.csv`, csv);
 }
 
 function download(name, text) {
@@ -171,159 +177,6 @@ function download(name, text) {
   a.download = name;
   a.click();
   URL.revokeObjectURL(a.href);
-}
-
-/* =================================================================
- * 二、资料库
- * ================================================================= */
-const RES = { list: null, rankTables: [] };
-
-async function initResource() {
-  try {
-    const r = await api('/resource/rank/list');
-    RES.list = r;
-    RES.rankTables = r.tables || [];
-    const provs = [...new Set(RES.rankTables.map((t) => t.province))];
-    const sel = document.getElementById('rk-province');
-    sel.innerHTML = provs.map((p) => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
-    sel.value = '广东';
-    if (!provs.includes('广东')) sel.value = provs[0] || '';
-    refreshRankOptions();
-    const hint = document.getElementById('res-hint');
-    hint.innerHTML = `一分一段表来源：<b>${esc(r.source || '中国教育在线')}</b> ·
-      已收录 <b>${RES.rankTables.length}</b> 个 省份-年份-科类 组合，覆盖 <b>${provs.length}</b> 个省份 ·
-      另有 <b>${(r.imageOnly || []).length}</b> 条官方以图片发布（已在下方列出原文链接）`;
-  } catch (e) { toast('资料库加载失败：' + e.message); }
-}
-
-function refreshRankOptions() {
-  const prov = document.getElementById('rk-province').value;
-  const list = RES.rankTables.filter((t) => t.province === prov);
-  const ySel = document.getElementById('rk-year');
-  const tSel = document.getElementById('rk-type');
-  const years = [...new Set(list.map((t) => t.year))].sort((a, b) => b - a);
-  ySel.innerHTML = years.map((y) => `<option value="${y}">${y} 年</option>`).join('');
-  const types = [...new Set(list.filter((t) => String(t.year) === ySel.value).flatMap((t) => t.types))];
-  tSel.innerHTML = types.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join('');
-  ySel.onchange = refreshRankOptions;
-}
-
-async function queryRankScore() {
-  const pid = provinceIdOf(document.getElementById('rk-province').value);
-  const score = document.getElementById('rk-score').value;
-  const box = document.getElementById('rk-result');
-  if (!score) return toast('请输入分数');
-  box.innerHTML = loading('查询中…');
-  try {
-    const r = await api('/resource/rank', { provinceId: pid, type: document.getElementById('rk-type').value, year: document.getElementById('rk-year').value, score });
-    if (!r.ok) {
-      box.innerHTML = emptyBox('📭', esc(r.message) + (r.available?.length ? `<div class="hint">该省可用：${r.available.map((x) => x.year + x.type).join('、')}</div>` : ''));
-      return;
-    }
-    box.innerHTML = `<div class="card">
-      <div class="filters" style="align-items:center">
-        <h2 class="h2">${esc(r.year)} 年 · ${esc(r.type)} · ${r.score} 分</h2>
-        <span class="tag" style="background:#fee2e2;color:#b91c1c">全省位次 <b style="font-size:16px">${fmt(r.rank)}</b></span>
-        <span class="tag">该科类考生总数 ${fmt(r.total)}</span>
-        <span class="tag">分数区间 ${r.range[0]}~${r.range[1]}</span>
-        ${r.full ? '<span class="tag tpub">数据完整</span>' : `<span class="tag" style="background:#fef3c7;color:#92400e">官方分段发布，存在缺口</span>`}
-        <div class="spacer"></div>
-        <a class="btn sm" href="${esc(r.url)}" target="_blank" rel="noopener">查看原文 ↗</a>
-      </div>
-      <div class="hint">${esc(r.title)}</div>
-      ${r.gaps && r.gaps.length ? `<div class="hint" style="color:#b45309">⚠ 该表缺失分数段：${r.gaps.map((g) => (g[0] === g[1] ? g[0] : g[0] + '~' + g[1])).join('、')}（官方原文如此，未做任何补值）</div>` : ''}
-    </div>`;
-  } catch (e) { box.innerHTML = emptyBox('⚠️', '查询失败：' + esc(e.message)); }
-}
-
-async function showRankTable() {
-  const pid = provinceIdOf(document.getElementById('rk-province').value);
-  const box = document.getElementById('rk-result');
-  box.innerHTML = loading('读取表格…');
-  try {
-    const r = await api('/resource/rank', { provinceId: pid, year: document.getElementById('rk-year').value, type: document.getElementById('rk-type').value, size: 2000 });
-    if (!r.ok) { box.innerHTML = emptyBox('📭', esc(r.message)); return; }
-    box.innerHTML = `<div class="card">
-      <div class="filters" style="align-items:center">
-        <h2 class="h2">${esc(r.province)} ${r.year} 年 ${esc(r.type)} 一分一段表</h2>
-        <span class="tag">共 ${r.count} 档 · 考生 ${fmt(r.total)}</span>
-        ${r.full ? '<span class="tag tpub">完整</span>' : '<span class="tag" style="background:#fef3c7;color:#92400e">存在缺口</span>'}
-        <div class="spacer"></div>
-        <a class="btn sm" href="${esc(r.url)}" target="_blank" rel="noopener">原文 ↗</a>
-      </div>
-      <div class="hint">${esc(r.title)}</div>
-      <div class="tablewrap" style="max-height:600px;overflow-y:auto;margin-top:10px"><table>
-        <thead><tr><th>分数</th><th>本段人数</th><th>累计人数（位次）</th></tr></thead>
-        <tbody>${r.rows.map((x) => `<tr><td><b>${x[0]}</b></td><td class="num">${fmt(x[2])}</td><td class="num"><b>${fmt(x[1])}</b></td></tr>`).join('')}</tbody>
-      </table></div>
-    </div>`;
-  } catch (e) { box.innerHTML = emptyBox('⚠️', '读取失败：' + esc(e.message)); }
-}
-
-const provinceIdOf = (name) => {
-  const p = (S.meta?.provinces || []).find((x) => x.name === name);
-  return p ? p.id : '';
-};
-
-async function queryCodes() {
-  const name = document.getElementById('cd-school').value.trim();
-  const pid = document.getElementById('cd-province').value;
-  const year = document.getElementById('cd-year').value || new Date().getFullYear();
-  const box = document.getElementById('cd-result');
-  if (!name) return toast('请输入院校名称');
-  box.innerHTML = loading('查询中…（首次查询需联网获取招生计划）');
-  let school = (S.schools || []).find((s) => s.name === name);
-  if (!school) {
-    const r = await api('/schools', { q: name, size: 5 });
-    S.schools = r.items || [];
-    school = S.schools[0];
-  }
-  if (!school) { box.innerHTML = emptyBox('🔍', '未找到该院校'); return; }
-  const provinceSelect = document.getElementById('cd-province');
-  const provinceLabel = provinceSelect?.selectedOptions?.[0]?.text
-    || (S.meta?.provinces || []).find((p) => String(p.id) === String(pid))?.name || '';
-  try {
-    const r = await api('/resource/codes', { schoolId: school.id, provinceId: pid, year, with: 'both' });
-    const planRows = (r.plan || []).map((x) => `<tr>
-      <td>${esc(x.group || '—')}</td><td><b>${esc(x.majorCode || '—')}</b></td><td>${esc(x.major || '')}
-        ${x.majorFull && x.majorFull !== x.major ? `<div class="meta">${esc(x.majorFull.slice(0, 40))}</div>` : ''}</td>
-      <td>${esc(x.level3 || x.level2 || '')}</td><td>${esc(x.subjectReq || '')}</td>
-      <td class="num">${fmt(x.planNum)}</td><td class="num">${esc(x.tuition || '')}</td><td>${esc(x.length || '')}</td></tr>`).join('');
-    const spRows = (r.special || []).map((x) => `<tr>
-      <td>${esc(x.group || '—')}</td><td><b>${esc(x.provinceCode || '—')}</b></td><td>${esc(x.major || '')}</td>
-      <td>${esc(x.subjectReq || '')}</td><td class="num">${fmt(x.min)}</td><td class="num">${fmt(x.minRank)}</td><td>${esc(x.type || '')}</td></tr>`).join('');
-    box.innerHTML = `
-    <div class="card">
-      <div class="filters" style="align-items:center">
-        <h2 class="h2">${esc(r.school?.name || name)}</h2>
-        <span class="tag" style="background:#fee2e2;color:#b91c1c">院校代码 <b style="font-size:15px">${esc(r.nationalCode || '—')}</b></span>
-        <span class="tag">${esc(r.school?.province || '')} · ${esc(r.school?.level || '')}</span>
-        <span class="tag">${r.year} 年 · ${esc(provinceLabel)}</span>
-        ${r.specialSource ? `<span class="tag tpub">数据源：${esc(r.specialSource)}</span>` : ''}
-        <div class="spacer"></div>
-        <a class="btn sm" href="https://www.gaokao.cn/school/${school.id}" target="_blank" rel="noopener">掌上高考 ↗</a>
-      </div>
-      ${r.provinceCodes && r.provinceCodes.length ? `<div class="hint">该校<b>历年招生院校代码</b>：${r.provinceCodes.slice(0, 12).map((c) => `${c.year}年 <b>${esc(c.code)}</b>`).join(' · ')}</div>` : ''}
-      <div class="hint">院校代码优先取统一数据集里的招生代码，其次取教育部国标代码（5 位）。不同省份的<b>招生代码</b>编排不同，请以本省当年《招生专业目录》为准。</div>
-    </div>
-    <div class="card">
-      <h2 class="h2">招生计划 · 专业代码 <span class="pill">${(r.plan || []).length}</span>
-        ${r.planSource ? `<span class="tag tpub">数据源：${esc(r.planSource)}</span>` : ''}
-        ${r.planFailed ? '<span class="tag" style="background:#fef3c7;color:#92400e">上游限流，稍后重试</span>' : ''}
-        ${r.planPartial ? '<span class="tag" style="background:#fef3c7;color:#92400e">部分结果</span>' : ''}</h2>
-      ${planRows ? `<div class="tablewrap" style="margin-top:10px;max-height:520px;overflow-y:auto"><table>
-        <thead><tr><th>专业组</th><th>专业代码</th><th>专业名称</th><th>门类</th><th>选科要求</th><th>计划数</th><th>学费</th><th>学制</th></tr></thead>
-        <tbody>${planRows}</tbody></table></div>` : emptyBox('📭', '暂无招生计划数据')}
-    </div>
-    <div class="card">
-      <h2 class="h2">专业录取线 · ${esc(r.codeType || '专业代码')} <span class="pill">${(r.special || []).length}</span>
-        ${r.specialSource ? `<span class="tag tpub">数据源：${esc(r.specialSource)}</span>` : ''}
-        ${r.specialFailed ? '<span class="tag" style="background:#fef3c7;color:#92400e">上游限流，稍后重试</span>' : ''}</h2>
-      ${spRows ? `<div class="tablewrap" style="margin-top:10px;max-height:520px;overflow-y:auto"><table>
-        <thead><tr><th>专业组</th><th>专业代码</th><th>专业名称</th><th>选科要求</th><th>最低分</th><th>最低位次</th><th>科类</th></tr></thead>
-        <tbody>${spRows}</tbody></table></div>` : emptyBox('📭', '暂无专业分数线数据')}
-    </div>`;
-  } catch (e) { box.innerHTML = emptyBox('⚠️', '查询失败：' + esc(e.message)); }
 }
 
 /* =================================================================
@@ -361,6 +214,12 @@ function refreshAiProfile() {
     分数: m.score, 位次: m.rank, 批次线: m.batchLine, 线差: m.userDiff,
     意向专业: m.major || '', 填报策略: m.strategyLabel,
     方案条数: PLAN.slots.length,
+    参考年份: (m.refYears || []).join('/'),
+    // 服务端 /api/ai/chat 还会注入 profile.dataQuality（逐表截止年份）；
+    // 这里给模型一句可直接引用的中文约束，避免把灰数据数值说成当年官方数据。
+    数据时效提醒: PLAN.dq
+      ? `数据版本 ${PLAN.dq.dataVersion || '未标注'}，完整基准年 ${PLAN.dq.baselineYear || '未标注'}；${PLAN.dq.snapshotText || ''}；◐ 部分/抽样、≈ 估算拟合、ⓘ 回填或图片缺口、⚠ 历史回退 的数值不得说成当年官方数据`
+      : '数据版本未标注，勿将历史分数与位次当作当年数据',
     已生成方案前10条: PLAN.slots.slice(0, 10).map((s) => `${s.tierLabel}｜${s.school.name}｜${s.major || s.group || ''}｜概率${s.probability}%`),
   };
 }
@@ -370,7 +229,7 @@ function aiRenderMessages() {
   if (!AI.messages.length) {
     box.innerHTML = `<div class="empty" style="padding:26px"><span class="big">💬</span>
       先在上方「API 设置」里填入 Key，然后开始对话。<br>
-      <span class="meta">例如：广东物理类 600 分，家里想让我学计算机，但我想学新闻，怎么选？</span></div>`;
+      <span class="meta">例如：河北物理类 600 分，家里想让我学计算机，但我想学新闻，怎么选？</span></div>`;
     return;
   }
   box.innerHTML = AI.messages.map((m, i) => `
@@ -517,7 +376,7 @@ function renderAiAdvice(d) {
 function bindExtra() {
   renderSubjectChips();
 
-  // 志愿方案
+  // 志愿参考
   document.getElementById('p-province').addEventListener('change', () => refreshDict('p'));
   document.getElementById('p-mode').addEventListener('change', () => {
     const m = document.getElementById('p-mode').value;
@@ -527,29 +386,8 @@ function bindExtra() {
   document.getElementById('p-run').addEventListener('click', runPlan);
   document.getElementById('p-clear').addEventListener('click', () => { PLAN.slots = []; PLAN.meta = null; document.getElementById('p-result').innerHTML = ''; });
 
-  // 资料库
-  document.querySelectorAll('#res-tabs .seg-btn').forEach((b) => b.addEventListener('click', () => {
-    document.querySelectorAll('#res-tabs .seg-btn').forEach((x) => x.classList.toggle('active', x === b));
-    document.getElementById('res-rank').style.display = b.dataset.seg === 'rank' ? '' : 'none';
-    document.getElementById('res-code').style.display = b.dataset.seg === 'code' ? '' : 'none';
-  }));
-  document.getElementById('rk-province').addEventListener('change', refreshRankOptions);
-  document.getElementById('rk-year').addEventListener('change', refreshRankOptions);
-  document.getElementById('rk-query').addEventListener('click', queryRankScore);
-  document.getElementById('rk-table').addEventListener('click', showRankTable);
-  document.getElementById('rk-score').addEventListener('keydown', (e) => { if (e.key === 'Enter') queryRankScore(); });
-  document.getElementById('cd-query').addEventListener('click', queryCodes);
-  let cdTimer;
-  document.getElementById('cd-school').addEventListener('input', (e) => {
-    clearTimeout(cdTimer);
-    const v = e.target.value.trim();
-    cdTimer = setTimeout(async () => {
-      if (!v) return;
-      const r = await api('/schools', { q: v, size: 20 });
-      S.schools = r.items || [];
-      document.getElementById('school-list2').innerHTML = S.schools.map((s) => `<option value="${esc(s.name)}">${esc(s.province)} · ${esc(s.level)}</option>`).join('');
-    }, 260);
-  });
+  // v3：旧「一分一段/代码」资料库页已整页删除，其 #res-* / #rk-* / #cd-* 绑定
+  // 必须一并移除，否则 null.addEventListener 会中断后续 AI 等全部绑定。
 
   // AI
   aiCfgLoad();
@@ -578,7 +416,6 @@ function bootExtra() {
   if (extraBooted) return;
   extraBooted = true;
   try { bindExtra(); } catch (e) { console.error('扩展模块初始化失败', e); }
-  initResource().catch((e) => console.error('资料库初始化失败', e));
 }
 document.addEventListener('app-ready', bootExtra);
 // 兜底：若 app.js 已经初始化完成（脚本顺序变化等），延迟后仍尝试一次

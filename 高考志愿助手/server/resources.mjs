@@ -10,6 +10,8 @@ import {
 } from './data.mjs';
 import * as gc from './gcdb.mjs';
 import { gcIdOf } from './gcsource.mjs';
+import * as quality from './quality.mjs';
+import { TABLE_SOURCE } from './quality-core.mjs';
 import { fetchAll } from './upstream.mjs';
 import path from 'node:path';
 
@@ -28,20 +30,28 @@ const rankIndex = new Map();      // `${pid}_${year}_${type}` -> item
 // ==================================================================
 const GC_ON = () => { try { return gc.available(); } catch { return false; } };
 
+/** 来源项目主页（不是该省该年表格的官方出处；逐单元格出处以 cell_manifest.source 为准） */
+const SOURCE_URLS = {
+  score_range: [
+    'https://huggingface.co/datasets/choucsan/Gaokao-Compass-11M',
+    'https://github.com/lifefloating/gaokao-vault',
+  ],
+};
+
 /** 新数据源的一分一段（内部统一返回与旧结构相同的字段） */
 function gcRankTable(pid, year, type) {
   const t = gc.rankTable(Number(pid), Number(year), type);
   if (!t || !t.series.length) return null;
-  // GaokaoCompass 只到 2025 年，2026 及以后的行来自 gaokao-vault 抓取
-  const src = t.year >= 2026 ? 'gaokao-vault' : 'GaokaoCompass';
+  // Q6 修复点：不再用 `year >= 2026` 硬猜来源并当作确证。
+  // 逐单元格来源优先取烘焙的 cell_manifest；未烘焙时只给表级来源 + basis 标注。
+  const s = quality.sourceOf(Number(pid), t.year, 'score_range');
   return {
     province: t.province, year: t.year, type: type || t.type,
     series: t.series, range: t.range, total: t.total, gaps: t.gaps, full: t.full,
-    url: t.year >= 2026
-      ? 'https://github.com/lifefloating/gaokao-vault'
-      : 'https://huggingface.co/datasets/choucsan/Gaokao-Compass-11M',
-    title: `${src} · ${t.province} ${t.year} 年一分一段表`,
-    control: t.control, source: src,
+    url: SOURCE_URLS.score_range[0], sourceUrls: SOURCE_URLS.score_range,
+    title: `${t.province} ${t.year} 年一分一段表`,
+    control: t.control,
+    source: s.source, sourceBasis: s.basis, dataState: s.state, sampled: s.sampled,
   };
 }
 
@@ -110,7 +120,12 @@ export function availableRank(pid) {
   if (GC_ON()) {
     for (const r of gc.rankYears(Number(pid))) {
       const k = `${r.year}_${r.type}`;
-      if (!seen.has(k)) { seen.add(k); out.push({ year: r.year, type: r.type, source: r.year >= 2026 ? 'gaokao-vault' : 'GaokaoCompass' }); }
+      if (!seen.has(k)) {
+        seen.add(k);
+        const s = quality.sourceOf(Number(pid), r.year, 'score_range');
+        out.push({ year: r.year, type: r.type, source: s.source,
+          sourceBasis: s.basis, state: s.state, sampled: s.sampled });
+      }
     }
   }
   loadRankTables();
@@ -151,7 +166,10 @@ export function realScoreToRank(pid, type, score, preferYear) {
     }
   }
   if (!rank) return null;
-  return { rank, year: t.year, type: t.type, exact, total: t.total, range: t.range, url: t.url, title: t.title, gaps: t.gaps, full: t.full };
+  return { rank, year: t.year, type: t.type, exact, total: t.total, range: t.range,
+    url: t.url, title: t.title, gaps: t.gaps, full: t.full,
+    source: t.source || null, sourceBasis: t.sourceBasis || null,
+    dataState: t.dataState || null, sampled: t.sampled || 0 };
 }
 
 /** 位次 → 分数（用真实一分一段表） */
@@ -336,7 +354,11 @@ export function resourceStatus() {
     let tableCount = 0;
     for (const [pid] of PROVINCES_ARR) tableCount += gc.rankYears(pid).length;
     return {
-      source: 'GaokaoCompass（2017-2025）+ gaokao-vault（2026 增量）',
+      // T2：来源改为表级 manifest 拼接，并明确标注尚未逐单元格溯源，
+      // 不再把「2017-2025 + 2026 增量」硬编码成看似确证的出处。
+      source: TABLE_SOURCE.score_range,
+      sourceBasis: 'table-level',
+      sourceNote: '逐单元格出处未烘焙；具体分数与位次以本省当年省教育考试院发布为准',
       tables: tableCount,
       rows: st.scoreRange,
       provinces: new Set(Object.values(byYear).flat()).size,

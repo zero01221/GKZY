@@ -21,6 +21,15 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
 import { DATA_DIR, PROVINCES } from './data.mjs';
+import { isValidMin, isValidMinRank, isValidCtrl, isValidCum, isValidScore, auditRankSeries } from './quality-core.mjs';
+
+/**
+ * 库内省名与标准省名不一致的别名表。
+ * 实测：dict(t='province') 里是「内蒙」，而 PROVINCES 标准码 15 是「内蒙古」，
+ * 导致 toDictPid(15) 找不到名字直接回退成 15，恰好命中 dict id 15 = 四川，
+ * 内蒙古考生会静默查到四川的数据。这里做双向补齐。
+ */
+export const PROVINCE_ALIAS = new Map([['内蒙', '内蒙古']]);
 
 // 允许用环境变量指向别处的数据库（构建/测试时用）
 export const GC_DB = process.env.GAOKAO_DB ? path.resolve(process.env.GAOKAO_DB) : path.join(DATA_DIR, 'gaokao.db');
@@ -49,6 +58,11 @@ const yearCache = new Map();        // `${p}|${y}` -> {categories:Set, batches:S
 // ------------------------------------------------------------------
 const STD2NAME = new Map(PROVINCES.map(([id, name]) => [Number(id), name]));
 const NAME2STD = new Map(PROVINCES.map(([id, name]) => [name, Number(id)]));
+// 库内别名 -> 标准码：让 toStdPid(库内「内蒙」) 也能正确返回 15
+for (const [alias, std] of PROVINCE_ALIAS) {
+  const code = NAME2STD.get(std);
+  if (code != null && !NAME2STD.has(alias)) NAME2STD.set(alias, code);
+}
 
 /** 标准省份码（11..65）或省名 -> 库内省份 id */
 export function toDictPid(pid) {
@@ -61,6 +75,23 @@ export function toDictPid(pid) {
 export function toStdPid(dictPid) {
   const name = D.province.byId.get(Number(dictPid));
   return name ? (NAME2STD.get(name) ?? Number(dictPid)) : Number(dictPid);
+}
+
+/**
+ * 31 省「标准码 -> 库内 id -> 标准码」回环自检。
+ * 用于发现省名字典别名/错配（历史 bug：内蒙古 -> 四川）。
+ */
+export function provinceRoundTrip() {
+  open();
+  const bad = [];
+  for (const [std, name] of PROVINCES) {
+    const dictId = toDictPid(Number(std));
+    const back = toStdPid(dictId);
+    if (back !== Number(std)) {
+      bad.push({ std: Number(std), name, dictId, back, dictName: D.province.byId.get(dictId) || null });
+    }
+  }
+  return { ok: bad.length === 0, total: PROVINCES.length, bad };
 }
 
 /** 首次使用时解压 .db.gz -> .db（只在磁盘上留一份，压缩包也保留以便分发） */
@@ -109,6 +140,11 @@ function loadDicts() {
     if (!box) continue;
     box.byId.set(r.id, r.v);
     if (!box.byName.has(r.v)) box.byName.set(r.v, r.id);
+    // 省名别名双向注册：库内「内蒙」同时登记为「内蒙古」，标准码换算才不会错配
+    if (r.t === 'province' && PROVINCE_ALIAS.has(r.v)) {
+      const std = PROVINCE_ALIAS.get(r.v);
+      if (!box.byName.has(std)) box.byName.set(std, r.id);
+    }
   }
   try {
     for (const r of db.prepare('SELECT id, name, province, nature, lv FROM school').all()) {
@@ -453,3 +489,134 @@ export function searchSchool(q, limit = 30) {
 }
 
 export function raw() { return db; }
+
+// ------------------------------------------------------------------
+// 数据质量元数据（构建期烘焙表）
+//   随包库若由 tools/verify_gcdb.mjs 生成，会带 6 张小表；
+//   旧包没有这些表时返回 null，由 server/quality.mjs 退化为主表实时计算。
+// ------------------------------------------------------------------
+const QUALITY_TABLES = [
+  'data_manifest', 'table_manifest', 'cell_manifest',
+  'coverage_cell', 'field_stats', 'quality_issue', 'gap_list', 'image_only', 'sample_audit',
+];
+let qMeta = null;
+function qualityMeta() {
+  if (qMeta) return qMeta;
+  open();
+  try {
+    const names = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name));
+    qMeta = { baked: QUALITY_TABLES.filter((t) => names.has(t)), hasCell: names.has('coverage_cell') };
+  } catch { qMeta = { baked: [], hasCell: false }; }
+  return qMeta;
+}
+export function hasQualityTables() { return qualityMeta().hasCell; }
+export function qualityTablesPresent() { return qualityMeta().baked.slice(); }
+
+/** 数据版本 / 构建信息；无 data_manifest 时回退 meta(k,v) */
+export function manifest() {
+  qualityMeta();
+  let row = null;
+  try { row = db.prepare('SELECT * FROM data_manifest LIMIT 1').get(); } catch { /* 无表 */ }
+  const kv = {};
+  try { for (const r of db.prepare('SELECT k, v FROM meta').all()) kv[r.k] = r.v; } catch { /* 无表 */ }
+  if (row) return { ...row, kv, baked: true };
+  return {
+    data_version: null, built_at: kv.builtAt || null,
+    gaokao_year: new Date().getFullYear(), baseline_year: 2025,
+    schema_version: 0, db_sha256: null, kv, baked: false,
+  };
+}
+
+/** 逐「省-年-表」单元格；pid 为标准省份码。无烘焙表返回 [] */
+export function coverageCells({ pid, year, table } = {}) {
+  if (!qualityMeta().hasCell) return [];
+  const where = [], args = [];
+  if (pid != null) { where.push('p=?'); args.push(toDictPid(pid)); }
+  if (year != null) { where.push('y=?'); args.push(Number(year)); }
+  if (table) { where.push('table_name=?'); args.push(table); }
+  const sql = `SELECT * FROM coverage_cell${where.length ? ' WHERE ' + where.join(' AND ') : ''}`;
+  return db.prepare(sql).all(...args).map((r) => ({ ...r, stdPid: toStdPid(r.p) }));
+}
+export function tableManifest() {
+  if (!qualityMeta().baked.includes('table_manifest')) return [];
+  try { return db.prepare('SELECT * FROM table_manifest').all(); } catch { return []; }
+}
+export function fieldStatsRows() {
+  if (!qualityMeta().baked.includes('field_stats')) return [];
+  try { return db.prepare('SELECT * FROM field_stats').all(); } catch { return []; }
+}
+export function qualityIssues(limit = 200) {
+  if (!qualityMeta().baked.includes('quality_issue')) return [];
+  try { return db.prepare('SELECT * FROM quality_issue LIMIT ?').all(limit); } catch { return []; }
+}
+
+/**
+ * 主表实时质量统计（无烘焙表时的退化路径）。
+ * 只读、全表聚合，一次进程内缓存；用于覆盖四态矩阵、字段非空率、异常清单。
+ */
+let liveStats = null;
+export function liveQualityStats() {
+  if (liveStats) return liveStats;
+  open();
+  const perCell = {};
+  for (const t of ['score_range', 'school_adm', 'major_adm', 'plan_code']) {
+    perCell[t] = {};
+    for (const r of db.prepare(`SELECT p, y, COUNT(*) c FROM ${t} GROUP BY p, y`).all()) {
+      const std = toStdPid(r.p);
+      perCell[t][`${std}|${r.y}`] = r.c;
+    }
+  }
+  const fields = {};
+  const one = (sql) => { try { return db.prepare(sql).get(); } catch { return {}; } };
+  fields.school_adm = one(`SELECT COUNT(*) total,
+      SUM(CASE WHEN min IS NULL OR min=0 THEN 0 ELSE 1 END) minNonNull,
+      SUM(CASE WHEN min>750 OR (min>0 AND min<100) THEN 1 ELSE 0 END) minOutOfRange,
+      SUM(CASE WHEN rnk IS NULL OR rnk=0 THEN 0 ELSE 1 END) rnkNonNull,
+      SUM(CASE WHEN ctrl IS NULL OR ctrl=0 THEN 0 ELSE 1 END) ctrlNonNull FROM school_adm`);
+  fields.major_adm = one(`SELECT COUNT(*) total,
+      SUM(CASE WHEN min IS NULL OR min=0 THEN 0 ELSE 1 END) minNonNull,
+      SUM(CASE WHEN min>750 OR (min>0 AND min<100) THEN 1 ELSE 0 END) minOutOfRange FROM major_adm`);
+  fields.score_range = one(`SELECT COUNT(*) total,
+      SUM(CASE WHEN cum IS NOT NULL AND cum<0 THEN 1 ELSE 0 END) cumBad,
+      SUM(CASE WHEN cum IS NULL THEN 1 ELSE 0 END) cumNull,
+      SUM(CASE WHEN score<0 OR score>800 THEN 1 ELSE 0 END) scoreBad FROM score_range`);
+  // 异常行样本（只读，不删除）——供质量面板「维护者详情」查看
+  const issues = [];
+  try {
+    for (const r of db.prepare('SELECT rowid rid, p, y, sid, min, rnk, ctrl FROM school_adm WHERE min>750 OR (min>0 AND min<100) LIMIT 60').all()) {
+      issues.push({ table: 'school_adm', stdPid: toStdPid(r.p), year: r.y, rowKey: String(r.rid), rule: 'min_out', value: r.min });
+    }
+  } catch { /* ignore */ }
+  try {
+    for (const r of db.prepare('SELECT rowid rid, p, y, score, cum FROM score_range WHERE cum IS NOT NULL AND cum<0 LIMIT 60').all()) {
+      issues.push({ table: 'score_range', stdPid: toStdPid(r.p), year: r.y, rowKey: String(r.rid), rule: 'cum_neg', value: r.cum });
+    }
+  } catch { /* ignore */ }
+  // 结构性分数缺口 + 一分一段组自洽诊断。
+  // 与构建期 tools/verify_gcdb.mjs 共用 auditRankSeries，保证烘焙表与实时聚合四态一致：
+  //   - 只有跨度 >LARGE_GAP_SCORE 的连续空白算缺口（官方表跳分是正常的）；
+  //   - score<=0 汇总行排除；seg 整组未发布时不要求 Σseg≈末 cum；
+  //   - 真实不自洽的组使其所在省-年 score_range 单元格降级 partial，默认排除。
+  const gaps = {};
+  const rankBad = {};
+  try {
+    const groups = new Map();
+    for (const r of db.prepare('SELECT p, y, c, score, cum, seg FROM score_range').all()) {
+      const k = `${r.p}|${r.y}|${r.c}`;
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(r);
+    }
+    for (const [k, list] of groups) {
+      const v = auditRankSeries(list);
+      const [p, y] = k.split('|');
+      const outKey = `${toStdPid(Number(p))}|${Number(y)}`;
+      if (v.largeGaps) gaps[outKey] = (gaps[outKey] || 0) + v.largeGaps;
+      if (!v.pass) rankBad[outKey] = (rankBad[outKey] || 0) + 1;
+    }
+  } catch { /* ignore */ }
+  liveStats = { perCell, fields, issues, gaps, rankBad, generatedAt: new Date().toISOString() };
+  return liveStats;
+}
+
+// 查询层合法性兜底：只读库无法物理隔离时，至少保证非法值不进入结果
+export { isValidMin, isValidMinRank, isValidCtrl, isValidCum, isValidScore };

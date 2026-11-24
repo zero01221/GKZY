@@ -16,6 +16,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
+import { appendProvenance, SOURCE_URLS, SOURCE_LICENSE } from './lib/provenance.mjs';
+import { CORE_TABLES, TABLE_SOURCE } from '../高考志愿助手/server/quality-core.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -218,8 +220,23 @@ insMeta.run('dropVocational', String(DROP_VOC));
 
 const one = (s) => dst.prepare(s).get().c;
 console.log('\n═══ 瘦身结果 ═══');
+const slimRows = {};
 for (const t of ['school', 'dict', 'score_range', 'school_adm', 'major_adm', 'plan_code', 'plan_info', 'school_code']) {
-  console.log(`  ${t.padEnd(14)} ${one(`SELECT COUNT(*) c FROM ${t}`).toLocaleString()}`);
+  slimRows[t] = one(`SELECT COUNT(*) c FROM ${t}`);
+  console.log(`  ${t.padEnd(14)} ${slimRows[t].toLocaleString()}`);
 }
 dst.close(); src.close();
+
+// ---- 开发侧溯源台账 ----
+// slim 是「确实写库」的一环：按表写 p=0,y=0 的表级汇总记录，
+// 供 verify_gcdb.mjs --apply 烘焙 table_manifest 时取表级来源（与逐单元格记录互补）。
+for (const table of CORE_TABLES) {
+  appendProvenance({
+    table, p: 0, y: 0,
+    source: TABLE_SOURCE[table],
+    sourceUrl: SOURCE_URLS.compass, license: SOURCE_LICENSE.compass,
+    sampled: false, complete: true, rows: Number(slimRows[table]) || 0,
+  });
+}
+console.log(`  溯源台账 ${CORE_TABLES.length} 张表级记录 -> data/gc/provenance.json`);
 console.log(`\n  ${mb(fs.statSync(SRC).size)} -> ${mb(fs.statSync(OUT).size)}  (${(fs.statSync(OUT).size / fs.statSync(SRC).size * 100).toFixed(0)}%)`);

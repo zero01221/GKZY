@@ -42,11 +42,20 @@ export function buildSystemPrompt(profile) {
   lines.push('3. 涉及分数/位次判断时，先确认考生的省份、科类、选科、分数或位次；信息不足就主动追问。');
   lines.push('4. 不要编造具体的录取分数与位次；需要时提示考生用工具里的「分数线查询 / 资料库」核对。');
   lines.push('5. 每次回答末尾，用一句话追问缺失的关键信息，推动多轮对话收敛到可执行方案。');
+  const dq = profile?.dataQuality;
+  if (dq) {
+    lines.push('\n## 数据时效与质量（工具自动带入，务必遵守）');
+    lines.push(`- 数据版本 ${dq.dataVersion || '未标注'}，构建日期 ${dq.builtAt || '未知'}，完整基准年 ${dq.baselineYear || '未知'}，当前高考年度 ${dq.gaokaoYear || '未知'}。`);
+    lines.push(`- 该省逐表数据截止年份：${(dq.tables || []).map((t) => `${t.table}=${t.latestYear ?? '—'}(${t.state || '未知'})`).join('、')}；禁止用全库最新年份代替。`);
+    lines.push(`- 数据新鲜度等级：${dq.level || '未知'}${dq.level === 'lagging' || dq.level === 'stale' ? '，属历史数据，须主动提醒考生核对当年官方数据' : ''}。`);
+    lines.push('6. 不得把 ◐ 部分/抽样、≈ 估算拟合、ⓘ 回填或图片缺口、⚠ 历史回退 的数值说成「当年官方数据」；涉及具体分数与位次，一律提示以本省当年《招生专业目录》与省教育考试院发布为准。');
+  }
   if (profile && Object.keys(profile).length) {
     lines.push('\n## 考生当前档案（工具自动带入）');
     for (const [k, v] of Object.entries(profile)) {
+      if (k === 'dataQuality' || k === 'provinceId') continue;
       if (v === undefined || v === null || v === '') continue;
-      lines.push(`- ${k}：${Array.isArray(v) ? v.join('、') : v}`);
+      lines.push(`- ${k}：${Array.isArray(v) ? v.join('、') : (typeof v === 'object' ? JSON.stringify(v) : v)}`);
     }
   }
   return lines.join('\n');

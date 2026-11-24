@@ -15,6 +15,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
+import { standardPid, writeBuildProvenance } from './lib/provenance.mjs';
+import { CORE_TABLES, TABLE_SOURCE } from '../高考志愿助手/server/quality-core.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -406,5 +408,33 @@ const KIND = (p) => (p.includes('score-range') ? 'score_range'
   console.log(`  失败文件     ${failed}`);
   console.log(`  数据库大小   ${(fs.statSync(OUT).size / 1024 / 1024).toFixed(1)} MB`);
   console.log(`  总用时       ${((Date.now() - t0) / 60000).toFixed(1)} 分钟`);
+
+  // ---- 开发侧溯源台账 ----
+  // 从已落库的主表按 (表, 省, 年) 聚合，逐单元格写入 data/gc/provenance.json。
+  // 来源字符串一律取 quality-core.mjs 的 TABLE_SOURCE（表级），不另造；
+  // 断点续跑也不漏：直接以库内实际数据为准，而非只记本次处理的文件。
+  // BugFix #1：批量合并写入本身默认 sampled:false / complete:true，但同一 (表,省,年,来源)
+  // 单元格可能已由 import_legacy_index.mjs 等后续导入标为抽样（河北 2026 后台抽样
+  // sampled=1/complete=0）；因 appendProvenance 幂等 key 相同，无条件覆盖会把抽样标记
+  // 改回「完整」，在非标准重跑顺序下误导 verify_gcdb.mjs 的 sampled 判定。
+  // 故合并语义统一交给 provenance.mjs 的 writeBuildProvenance（纯逻辑入口，
+  // 启用 preserveSampling 保留既有抽样标记），避免口径漂移且可脱离 CLI 独立验证。
+  const provNameById = new Map(
+    db.prepare("SELECT id, v FROM dict WHERE t='province'").all().map((r) => [r.id, r.v]));
+  const provCells = [];
+  for (const table of CORE_TABLES) {
+    try {
+      for (const r of db.prepare(`SELECT p, y, COUNT(*) c FROM ${table} GROUP BY p, y`).all()) {
+        const std = standardPid(provNameById.get(r.p) ?? '');
+        if (!std || !Number(r.y)) continue;
+        provCells.push({
+          table, p: std, y: Number(r.y), rows: Number(r.c),
+          source: TABLE_SOURCE[table],
+        });
+      }
+    } catch (e) { console.log(`  溯源台账 ${table} 跳过：${e.message}`); }
+  }
+  const written = writeBuildProvenance(provCells);
+  console.log(`  溯源台账     ${written} 个「表-省-年」单元格 -> data/gc/provenance.json`);
   db.close();
 })();

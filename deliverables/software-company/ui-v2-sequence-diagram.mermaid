@@ -1,0 +1,68 @@
+%% 高考志愿助手 · 界面改版 v2 —— 核心流程时序图（登录+迁移 / 生成留档 / 草稿导入 / 省控线）
+%% 单文件便于渲染时切换；完整 5 段分图见 ui-v2-architecture.md §7
+
+sequenceDiagram
+    actor U as 用户
+    participant UI as 前端模块
+    participant S as server.mjs
+    participant AU as auth.mjs
+    participant PL as province-lines.mjs
+    participant P as plan.mjs (不改)
+    participant ST as store.mjs
+    participant LS as localStorage
+
+    rect rgb(235,245,255)
+    Note over U,LS: 流程一：登录 + 收藏迁移
+    U->>UI: 点击登录，输入 admin/123456
+    UI->>S: POST /api/login
+    S->>AU: login(user,pass) → token
+    S-->>UI: {ok:true,user:'admin'} + Set-Cookie gk_sid
+    UI->>S: GET /api/wishlist
+    S->>ST: listWishlist()
+    S-->>UI: {ok:true,items}
+    UI->>LS: 读 gk_wishlist / gk_wishlist_migrated
+    alt 无迁移标记且本地有新增项
+        UI->>S: POST /api/wishlist/import {items}
+        S->>ST: importWishlist()（mergeKey 幂等去重）
+        S-->>UI: {ok:true,added,skipped}
+        UI->>LS: gk_wishlist_migrated = ISO 时间戳
+    end
+    UI->>UI: 顶栏 admin ▾|退出，解锁 data-auth 入口
+    end
+
+    rect rgb(240,255,240)
+    Note over U,ST: 流程二：生成方案自动留档
+    U->>UI: 点击「一键生成志愿方案」
+    UI->>S: GET /api/plan?...
+    S->>P: buildPlan(opt)（原逻辑不动）
+    P-->>S: {ok:true,meta,slots}
+    S->>ST: addHistory({meta,slots,context})（try/catch）
+    ST->>ST: 原子写 data/history.json
+    S-->>UI: withQuality(...) 原响应不变
+    end
+
+    rect rgb(255,250,235)
+    Note over U,ST: 流程三：草稿导入（字段映射见设计文档 §3.2）
+    U->>UI: 历史记录点「导入为草稿」
+    UI->>S: GET /api/history/:id
+    S->>ST: getHistory(id)
+    S-->>UI: HistoryRecord{slots[]}
+    UI->>UI: slots.map → DraftRow[]（重编号/obey='是'/概率丢弃）
+    UI->>S: POST /api/drafts {rows,sourceHistoryId}
+    S->>ST: addDraft()
+    S-->>UI: {ok:true,item}
+    U->>UI: 编辑行 → PUT /api/drafts/:id
+    S->>ST: updateDraft()（刷新 updatedAt）
+    Note over ST: 原 HistoryRecord 只读，副本与之解耦
+    end
+
+    rect rgb(245,240,255)
+    Note over U,PL: 流程四：省控线查询
+    U->>UI: 打开「河北省控线」
+    UI->>S: GET /api/lines?provinceId=13
+    S->>PL: getStaticBatchLines(13, y) ×5
+    PL-->>S: 有值单元格（缺键=暂无数据，禁插值）
+    S-->>UI: {ok:true,years,data}
+    UI->>UI: 渲染表格，缺键显示「暂无数据」
+    Note over PL: /api/plan 与 /api/recommend 经 gcsource.batchLines() 取同一真源做线差法
+    end

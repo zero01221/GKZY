@@ -1,0 +1,164 @@
+classDiagram
+  class DataManifest {
+    +string dataVersion
+    +string builtAt
+    +int gaokaoYear
+    +int baselineYear
+    +int schemaVersion
+    +string dbSha256
+    +string appVersion
+  }
+  class TableManifest {
+    +string dataVersion
+    +string tableName
+    +string source
+    +string sourceUrl
+    +string license
+    +string ingestedAt
+    +string publishedAt
+    +int rows
+    +int rowsQuarantined
+    +int minYear
+    +int maxYear
+    +string sha256
+    +string completeness
+  }
+  class CellManifest {
+    +string dataVersion
+    +int p
+    +int y
+    +string tableName
+    +string source
+    +string ingestedAt
+    +string publishedAt
+    +int rows
+    +int sampled
+    +int complete
+    +string checksum
+  }
+  class CoverageCell {
+    +int provinceId
+    +string province
+    +int year
+    +string tableName
+    +string state
+    +int rows
+    +int baselineRows
+    +float ratio
+    +int sampled
+    +int expected
+    +string basis
+    +string source
+    +string gapsJson
+  }
+  class QualityIssue {
+    +int id
+    +string tableName
+    +int p
+    +int y
+    +string rowKey
+    +string rule
+    +string reason
+    +string snapshotJson
+    +int quarantine
+  }
+  class FieldStats {
+    +string tableName
+    +int p
+    +int y
+    +string field
+    +int total
+    +int nonNull
+    +int filled
+    +float fillRate
+    +string fillSource
+  }
+  class Freshness {
+    +int provinceId
+    +string tableName
+    +int latestYear
+    +int latestCompleteYear
+    +int gaokaoYear
+    +int lagYears
+    +string level
+    +string state
+    +string source
+    +string ingestedAt
+  }
+  class DataQuality {
+    +string dataVersion
+    +string builtAt
+    +int gaokaoYear
+    +int baselineYear
+    +string province
+    +int provinceId
+    +int[] refYears
+    +map refYearStates
+    +bool historyFallback
+    +int fallbackYears
+    +string rankSource
+    +bool rankEstimated
+    +CtrlFilled ctrlFilled
+    +bool sampled
+    +string[] gaps
+    +string[] imageOnly
+    +map fieldFill
+    +Flag[] flags
+    +string snapshotText
+  }
+  class CtrlFilled {
+    +int count
+    +int total
+    +string source
+    +string label
+  }
+  class Flag {
+    +string symbol
+    +string label
+    +string cssClass
+    +string tooltip
+  }
+  class QualityEngine {
+    +verify(dbPath) Report
+    +quarantine(predicates) void
+    +buildCoverage() void
+    +buildFieldStats() void
+    +buildGaps() void
+    +writeReport(path) void
+    +assertFailOn(flags) int
+  }
+  class QualityService {
+    +snapshot(provinceId, ctx) DataQuality
+    +coverageMatrix(filter) CoverageCell[]
+    +freshness(provinceId, table) Freshness
+    +issues() QualityIssue[]
+    +fields() FieldStats[]
+    +audit() SampleAudit
+    +flagsOf(dq) Flag[]
+    +snapshotRow(dq) string
+    +usableYears(provinceId) int[]
+  }
+  class VerifyRules {
+    +checkMonotonic(rows) Issue[]
+    +checkCumulative(rows) Issue[]
+    +checkFieldBounds(rows) Issue[]
+    +checkProvinceRoundTrip() Issue[]
+  }
+
+  DataManifest "1" *-- "n" TableManifest : 逐表溯源
+  TableManifest "1" *-- "n" CellManifest : 逐省年细分
+  CellManifest "1" --> "1" CoverageCell : 稀疏/完成度判定输入
+  CoverageCell "1" --> "1" Freshness : 按省逐表聚合
+  QualityIssue ..> CoverageCell : 异常行不计入覆盖统计
+  FieldStats ..> DataQuality : 字段非空率披露
+  DataQuality "1" *-- "n" Flag : 统一图例
+  DataQuality "1" *-- "1" CtrlFilled : 回填量披露
+  QualityEngine ..> DataManifest : 生成
+  QualityEngine ..> CoverageCell : 生成
+  QualityEngine ..> QualityIssue : 生成
+  QualityEngine ..> FieldStats : 生成
+  QualityEngine *-- VerifyRules : 复用 crawl_resources 规则
+  QualityService ..> DataManifest : 只读
+  QualityService ..> CoverageCell : 只读
+  QualityService ..> QualityIssue : 只读
+  QualityService ..> DataQuality : 构造

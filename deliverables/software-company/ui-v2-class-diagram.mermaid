@@ -1,0 +1,141 @@
+classDiagram
+    class HistoryRecord {
+      +string id
+      +string createdAt
+      +string updatedAt
+      +HistoryMeta meta
+      +Slot[] slots
+      +GenContext context
+      +number slotCount
+    }
+    class HistoryMeta {
+      +string province
+      +number provinceId
+      +string type
+      +string[] subjects
+      +number score
+      +number rank
+      +string rankSourceLabel
+      +number batchLine
+      +number userDiff
+      +string batch
+      +number primaryYear
+      +number[] refYears
+      +string major
+      +string strategyLabel
+      +string generatedAt
+    }
+    class Slot {
+      +number order
+      +string tier
+      +string tierLabel
+      +School school
+      +string nationalCode
+      +string group
+      +string batch
+      +string subjectReq
+      +number probability
+      +string major
+      +string majorCode
+      +string reason
+    }
+    class GenContext {
+      +number provinceId
+      +string type
+      +number score
+      +number rank
+      +string subjects
+      +string major
+      +string strategy
+      +number total
+    }
+    class Draft {
+      +string id
+      +string name
+      +string createdAt
+      +string updatedAt
+      +DraftRow[] rows
+      +string sourceHistoryId
+    }
+    class DraftRow {
+      +number order
+      +string school
+      +string group
+      +string major
+      +string obey
+      +string tier
+      +string tierLabel
+      +string note
+    }
+    class WishItem {
+      +string id
+      +string key
+      +string mergeKey
+      +string type
+      +string school
+      +number schoolId
+      +number year
+      +string extra
+      +string major
+      +string createdAt
+    }
+    class Store {
+      +string DATA_DIR
+      +listHistory() HistoryRecord[]
+      +addHistory(rec) HistoryRecord
+      +getHistory(id) HistoryRecord
+      +deleteHistory(id) boolean
+      +listDrafts() Draft[]
+      +addDraft(d) Draft
+      +updateDraft(id, patch) Draft
+      +deleteDraft(id) boolean
+      +listWishlist() WishItem[]
+      +addWishlist(item) WishItem
+      +importWishlist(items) ImportResult
+      +deleteWishlist(key) boolean
+      -atomicWrite(file, data) void
+      -nextId(prefix) string
+    }
+    class Auth {
+      -Map~string,Session~ sessions
+      +string USER
+      +string PASS
+      +string COOKIE_NAME
+      +login(user, pass) string
+      +logout(token) void
+      +getSession(req) Session
+      +requireAuth(req, res) boolean
+      +setCookie(res, token) void
+      +clearCookie(res) void
+    }
+    class Session {
+      +string token
+      +string user
+      +string createdAt
+      +string expiresAt
+    }
+    class ProvinceLines {
+      +Map~number,object~ HEBEI
+      +getStaticBatchLines(pid, year) object
+      +staticYears(pid) number[]
+    }
+    class BatchLinesFunnel {
+      +batchLines(pid, year) object
+    }
+    class ServerRoutes {
+      +handleApi(req, res, url, body) void
+      +sendJson(res, obj, status) void
+    }
+
+    HistoryRecord "1" *-- "1" HistoryMeta
+    HistoryRecord "1" *-- "many" Slot
+    HistoryRecord "1" *-- "1" GenContext
+    Draft "1" *-- "many" DraftRow
+    Draft ..> HistoryRecord : sourceHistoryId (导入副本, 不回写)
+    Store ..> HistoryRecord : CRUD
+    Store ..> Draft : CRUD
+    Store ..> WishItem : CRUD / 按 mergeKey 去重
+    Auth "1" o-- "many" Session
+    ServerRoutes ..> Auth : requireAuth
+    ServerRoutes ..> Store : 持久化
+    BatchLinesFunnel ..> ProvinceLines : 优先查询唯一真源

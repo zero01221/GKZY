@@ -12,6 +12,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
+import { appendProvenance, standardPid, SOURCE_URLS } from './lib/provenance.mjs';
+import { TABLE_SOURCE } from '../高考志愿助手/server/quality-core.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -191,4 +193,19 @@ for (const t of results) {
 db.exec('COMMIT');
 try { db.exec('ANALYZE'); } catch { /* */ }
 console.log(`\n已写入 ${PROV} ${YEAR}：${results.map((t) => t.type).join(' / ')}`);
+
+// ---- 开发侧溯源台账 ----
+// 来自省考试院/官方转载的一分一段页（非抽样、非拟合）。
+// sourceUrl 用真实传入的页面 URL，不臆造接口；只写 data/gc/provenance.json。
+const stdPid = standardPid(PROV);
+if (stdPid) {
+  appendProvenance({
+    table: 'score_range', p: stdPid, y: YEAR,
+    source: TABLE_SOURCE.score_range,
+    sourceUrl: URL || SOURCE_URLS.eol, license: null,
+    sampled: false, complete: true,
+    rows: results.reduce((a, t) => a + t.series.length, 0),
+  });
+  console.log(`  溯源台账 score_range|${stdPid}|${YEAR} -> data/gc/provenance.json`);
+} else console.log(`  溯源台账：省名无法归一，跳过 ${PROV}`);
 db.close();

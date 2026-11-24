@@ -7,10 +7,22 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const fmt = (n) => (n == null || n === '' || Number.isNaN(Number(n))) ? '—' : Number(n).toLocaleString('zh-CN');
 const qs = (o) => Object.entries(o).filter(([, v]) => v !== '' && v != null).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
 
-async function api(path, params) {
-  const url = '/api' + path + (params ? '?' + qs(params) : '');
-  const r = await fetch(url);
-  if (!r.ok) throw new Error('HTTP ' + r.status);
+async function api(path, params, opts = {}) {
+  const method = String(opts.method || 'GET').toUpperCase();
+  const withBody = method === 'POST' || method === 'PUT';
+  const query = withBody ? (opts.query || null) : params;
+  const url = '/api' + path + (query ? '?' + qs(query) : '');
+  const init = { method, credentials: 'same-origin', headers: {} };
+  if (withBody) {
+    init.headers['Content-Type'] = 'application/json';
+    init.body = JSON.stringify(params || {});
+  }
+  const r = await fetch(url, init);
+  if (!r.ok) {
+    let message = 'HTTP ' + r.status;
+    try { const j = await r.json(); if (j.message) message = j.message; } catch { /* 保留默认错误 */ }
+    throw new Error(message);
+  }
   return r.json();
 }
 let toastTimer;
@@ -22,6 +34,16 @@ function toast(msg, ms = 2400) {
 }
 const loading = (txt = '加载中…') => `<div class="loading"><div class="spinner"></div>${esc(txt)}</div>`;
 const emptyBox = (icon, txt) => `<div class="empty"><span class="big">${icon}</span>${txt}</div>`;
+/** 导出用数据快照：只保留版本事实，剥掉质量模块旧版兜底文案中的对外话术。 */
+function snapshotForExport(dq) {
+  if (dq?.snapshotText) return String(dq.snapshotText);
+  if (typeof QualityUI !== 'undefined') {
+    // 用 Unicode 转义书写待剥离话术，避免源码中出现对外文案字面量
+    return String(QualityUI.csvSnapshot(dq))
+      .replace(/[；;。]?\s*\u8bf7\u4ee5\u672c\u7701\u5f53\u5e74[^\u3002\uff1b;]*\u4e3a\u51c6/g, '');
+  }
+  return '数据版本未标注';
+}
 
 /* ---------------- 全局状态 ---------------- */
 const S = { dict: null, meta: null, schools: [], wishlist: loadWishlist() };
@@ -34,59 +56,104 @@ function saveWishlist() {
   const c = $('#w-count'); if (c) c.textContent = S.wishlist.length;
 }
 function isWished(key) { return S.wishlist.some((x) => x.key === key); }
-function toggleWish(item) {
-  const i = S.wishlist.findIndex((x) => x.key === item.key);
-  if (i >= 0) S.wishlist.splice(i, 1); else S.wishlist.push(item);
-  saveWishlist();
-  toast(i >= 0 ? '已从志愿表移除' : '已加入志愿表');
-  renderWishlist();
-  $$('.star').forEach((b) => { if (b.dataset.key) b.classList.toggle('on', isWished(b.dataset.key)); });
+
+/** 登录后以服务端列表为准刷新本地镜像，同时保留尚未迁移成功的本地条目。 */
+async function loadServerWishlist() {
+  if (!window.AuthUI?.isAuthenticated()) return;
+  try {
+    const r = await api('/wishlist');
+    if (!r.ok) return;
+    const serverItems = r.items || [];
+    const serverKeys = new Set(serverItems.map((x) => x.key));
+    S.wishlist = serverItems.concat(S.wishlist.filter((x) => !serverKeys.has(x.key)));
+    saveWishlist();
+  } catch (e) { console.error('收藏同步失败：', e.message); }
 }
 
-/* ---------------- Tab ---------------- */
-$$('#tabs .tab').forEach((b) => b.addEventListener('click', () => {
-  $$('#tabs .tab').forEach((x) => x.classList.toggle('active', x === b));
+/** 登录态双写服务端：本地先更新保证即时反馈，服务端成功后以其返回为准。 */
+async function syncWishToServer(item, adding) {
+  if (!window.AuthUI?.isAuthenticated()) return;
+  try {
+    if (adding) {
+      const r = await api('/wishlist', item, { method: 'POST' });
+      if (r.ok && r.item) {
+        const i = S.wishlist.findIndex((x) => x.key === item.key);
+        if (i >= 0) S.wishlist[i] = { ...S.wishlist[i], ...r.item };
+        saveWishlist();
+      }
+    } else {
+      await api('/wishlist', { key: item.key }, { method: 'DELETE' });
+    }
+  } catch (e) { toast('收藏同步失败：' + e.message); }
+}
+
+function toggleWish(item) {
+  const i = S.wishlist.findIndex((x) => x.key === item.key);
+  const adding = i < 0;
+  if (adding) S.wishlist.push(item); else S.wishlist.splice(i, 1);
+  saveWishlist();
+  toast(adding ? '已加入志愿表' : '已从志愿表移除');
+  renderWishlist();
+  $$('.star').forEach((b) => { if (b.dataset.key) b.classList.toggle('on', isWished(b.dataset.key)); });
+  syncWishToServer(item, adding);
+}
+
+/* ---------------- Tab（通用 [data-tab]，兼容侧边栏入口） ---------------- */
+$$('[data-tab]').forEach((b) => b.addEventListener('click', () => {
+  if (b.dataset.auth === '1' && !window.AuthUI?.isAuthenticated()) {
+    window.AuthUI?.promptLogin();       // 弹登录提示，不切页
+    return;
+  }
+  $$('[data-tab]').forEach((x) => x.classList.toggle('active', x === b));
   $$('.panel').forEach((p) => p.classList.toggle('active', p.id === 'panel-' + b.dataset.tab));
   if (b.dataset.tab === 'wishlist') renderWishlist();
   if (b.dataset.tab === 'data') renderData();
+  if (b.dataset.tab === 'lines') window.LinesUI?.render();
+  if (b.dataset.tab === 'rank') window.RankUI?.render();
+  if (b.dataset.tab === 'score') window.CollegeUI?.render();
+  if (b.dataset.tab === 'history') window.HistoryUI?.render();
+  if (b.dataset.tab === 'drafts') window.DraftUI?.render();
 }));
 
 /* ---------------- 初始化 ---------------- */
 async function init() {
   saveWishlist();
+  if (window.AuthUI) {
+    await window.AuthUI.init();
+    await loadServerWishlist();
+  }
   try {
     S.meta = await api('/meta');
-    $('#s-hint').innerHTML = `本地院校库 <b>${fmt(S.meta.schoolCount)}</b> 所，
-      大学环境数据 <b>${fmt(S.meta.collegeCount)}</b> 所，
-      已建分数线索引 <b>${S.meta.indexFiles}</b> 个省-年。
-      数据来源：掌上高考 / colleges.chat。`;
   } catch (e) { toast('加载基础信息失败：' + e.message); }
 
   const provOpts = (S.meta?.provinces || []).map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
-  for (const id of ['s-province', 'r-province', 'd-province', 'p-province', 'cd-province']) {
+  for (const id of ['s-province', 'd-province', 'p-province']) {
     const el = document.getElementById(id);
     if (el) el.innerHTML = '<option value="">请选择</option>' + provOpts;
   }
 
-  // 默认省份：广东（若存在）
-  for (const sel of ['#s-province', '#r-province', '#p-province', '#cd-province']) {
+  // 默认省份：河北（若存在）
+  for (const sel of ['#s-province', '#p-province']) {
     const el = $(sel);
-    if (el && [...el.options].some((o) => o.value === '44')) el.value = '44';
+    if (el && [...el.options].some((o) => o.value === '13')) el.value = '13';
   }
 
   await refreshDict('s');
-  await refreshDict('r');
   await refreshDict('p');
   bindEvents();
   renderWishlist();
-  // 通知扩展模块（志愿方案 / 资料库 / AI）可以初始化了
+  // 通知扩展模块（志愿参考 / 资料库 / AI）可以初始化了
   document.dispatchEvent(new CustomEvent('app-ready'));
 }
 
 async function refreshDict(prefix) {
-  const pid = $(`#${prefix}-province`).value;
-  const d = await api('/dict', { provinceId: pid || '' });
+  // v3：旧分数线/推荐页的 s-*/r-* DOM 已删除；缺失时直接返回，
+  // 避免真实浏览器中 null.value 抛错中断 init() 与后续事件绑定。
+  const pidEl = $(`#${prefix}-province`);
   const typeSel = $(`#${prefix}-type`);
+  if (!pidEl || !typeSel) return;
+  const pid = pidEl.value;
+  const d = await api('/dict', { provinceId: pid || '' });
   const cur = typeSel.value;
   const types = d.types?.length ? d.types : (S.meta?.types || []);
   typeSel.innerHTML = (prefix === 's' ? '<option value="">全部</option>' : '<option value="">请选择</option>')
@@ -188,7 +255,7 @@ function renderScoreResult(school, { prov, spec }, q) {
     </tr>`).join('');
 
   box.innerHTML = `
-  <div class="card">
+  <div class="card score-shell">
     <div class="filters" style="align-items:center">
       <h2 class="h2">${esc(school.name)} ${tierTag(school)}</h2>
       <span class="tag tpub">${esc(school.nature || '')}</span>
@@ -198,32 +265,45 @@ function renderScoreResult(school, { prov, spec }, q) {
       <a class="btn sm" href="https://www.gaokao.cn/school/${school.id}" target="_blank" rel="noopener">掌上高考 ↗</a>
       <button class="btn sm" id="s-trend">查看历年趋势</button>
     </div>
-  </div>
+    <div class="score-tabs" style="margin-top:12px">
+      <button class="score-tab active" id="score-tab-prov" type="button">录取分数线</button>
+      <button class="score-tab" id="score-tab-spec" type="button">专业分数线</button>
+    </div>
 
-  <div class="card">
-    <h2 class="h2">院校专业组投档线 <span class="pill">${provItems.length}</span>
-      ${prov.local ? '<span class="pill" style="background:#dcfce7;color:#166534">本地数据</span>' : '<span class="pill" style="background:#ffedd5;color:#c2410c">联网数据</span>'}</h2>
-    ${prov.warning ? `<div class="hint" style="color:#b45309">⚠ ${esc(prov.warning)}</div>` : ''}
-    ${provItems.length ? `<div class="tablewrap" style="margin-top:10px"><table>
-      <thead><tr><th>年份</th><th>科类</th><th>批次</th><th>专业组</th><th>选科要求</th>
-      <th>最低分</th><th>最低位次</th><th>省控线</th><th>线差</th><th>收藏</th></tr></thead>
-      <tbody>${provRows}</tbody></table></div>`
-      : emptyBox('📭', '暂无该校在本省的投档线数据（可切换年份或省份再试）')}
-  </div>
+    <div class="score-section" data-score-section="prov">
+      <h2 class="h2" style="margin-top:12px">录取分数线 <span class="score-sub">院校专业组投档线</span> <span class="pill">${provItems.length}</span>
+        ${prov.local ? '<span class="pill" style="background:#dcfce7;color:#166534">本地数据</span>' : '<span class="pill" style="background:#ffedd5;color:#c2410c">联网数据</span>'}</h2>
+      ${prov.warning ? `<div class="hint" style="color:#b45309">⚠ ${esc(prov.warning)}</div>` : ''}
+      ${provItems.length ? `<div class="tablewrap" style="margin-top:10px"><table>
+        <thead><tr><th>年份</th><th>科类</th><th>批次</th><th>专业组</th><th>选科要求</th>
+        <th>最低分</th><th>最低位次</th><th>省控线</th><th>线差</th><th>收藏</th></tr></thead>
+        <tbody>${provRows}</tbody></table></div>`
+        : emptyBox('📭', '暂无该校在本省的投档线数据（可切换年份或省份再试）')}
+    </div>
 
-  <div class="card">
-    <h2 class="h2">专业录取分数线 <span class="pill">${majorList.length}</span>
-      <span class="pill" style="background:#ffedd5;color:#c2410c">实时获取</span></h2>
-    ${spec.warning ? `<div class="hint" style="color:#b45309">⚠ ${esc(spec.warning)}</div>` : ''}
-    ${majorList.length ? `<div class="tablewrap" style="margin-top:10px"><table>
-      <thead><tr><th>年份</th><th>专业</th><th>门类 / 专业类</th><th>选科要求</th>
-      <th>最低分</th><th>最低位次</th><th>省控线</th><th>备注</th><th>收藏</th></tr></thead>
-      <tbody>${specRows}</tbody></table></div>
-      ${majorList.length >= 300 ? '<div class="hint">仅显示前 300 条</div>' : ''}`
-      : emptyBox('📭', q.major ? `未找到包含「${esc(q.major)}」的专业记录` : '暂无专业分数线数据')}
+    <div class="score-section" data-score-section="spec" hidden>
+      <h2 class="h2" style="margin-top:12px">专业分数线 <span class="score-sub">专业录取分数线</span> <span class="pill">${majorList.length}</span>
+        <span class="pill" style="background:#ffedd5;color:#c2410c">实时获取</span></h2>
+      ${spec.warning ? `<div class="hint" style="color:#b45309">⚠ ${esc(spec.warning)}</div>` : ''}
+      ${majorList.length ? `<div class="tablewrap" style="margin-top:10px"><table>
+        <thead><tr><th>年份</th><th>专业</th><th>门类 / 专业类</th><th>选科要求</th>
+        <th>最低分</th><th>最低位次</th><th>省控线</th><th>备注</th><th>收藏</th></tr></thead>
+        <tbody>${specRows}</tbody></table></div>
+        ${majorList.length >= 300 ? '<div class="hint">仅显示前 300 条</div>' : ''}`
+        : emptyBox('📭', q.major ? `未找到包含「${esc(q.major)}」的专业记录` : '暂无专业分数线数据')}
+    </div>
   </div>
 
   <div class="card" id="trend-card" style="display:none"></div>`;
+
+  const switchScoreSection = (which) => {
+    $$('#score-tab-prov, #score-tab-spec').forEach((t) => t.classList.toggle('active', t.id === 'score-tab-' + which));
+    $$('#s-result .score-section').forEach((s) => { s.hidden = s.dataset.scoreSection !== which; });
+    const trend = $('#trend-card');
+    if (trend) trend.style.display = 'none';
+  };
+  $('#score-tab-prov')?.addEventListener('click', () => switchScoreSection('prov'));
+  $('#score-tab-spec')?.addEventListener('click', () => switchScoreSection('spec'));
 
   $$('#s-result .star').forEach((b) => b.addEventListener('click', () => {
     const key = b.dataset.key;
@@ -345,161 +425,6 @@ async function showCampus(name) {
   } catch (e) { box.innerHTML = emptyBox('⚠️', '加载失败：' + esc(e.message)); }
 }
 
-/* ---------------- 3. 智能推荐 ---------------- */
-async function runRecommend() {
-  const pid = $('#r-province').value;
-  const type = $('#r-type').value;
-  const mode = $('#r-mode').value;
-  const score = $('#r-score').value;
-  const rank = $('#r-rank').value;
-  const major = $('#r-major').value.trim();
-  const box = $('#r-result');
-
-  if (!pid) return toast('请选择生源省份');
-  if (!type) return toast('请选择科类');
-  if (mode === 'score' && !score) return toast('请输入分数');
-  if (mode === 'rank' && !rank) return toast('请输入位次');
-
-  box.innerHTML = loading('正在计算冲稳保…（首次查询某省份可能需要数十秒联网获取）');
-  try {
-    const r = await api('/recommend', {
-      provinceId: pid, type, major,
-      score: mode === 'score' ? score : '', rank: mode === 'rank' ? rank : '', limit: 60,
-    });
-    if (!r.ok) { box.innerHTML = emptyBox('⚠️', esc(r.message)) + syncHint(pid); return; }
-    renderRecommend(r, { pid, type, major });
-  } catch (e) {
-    box.innerHTML = emptyBox('⚠️', '推荐失败：' + esc(e.message));
-  }
-}
-function syncHint(pid) {
-  return `<div class="card"><div class="hint">该省份暂无本地索引。可点击右侧按钮加入后台同步队列，
-    或切换到已有数据的省份体验。</div>
-    <div style="margin-top:10px"><button class="btn primary" onclick="syncProvince(${pid})">立即同步该省数据</button></div></div>`;
-}
-window.syncProvince = async (pid) => {
-  const y = new Date().getFullYear();
-  const r = await api('/sync', { provinces: pid, year: y, priority: 1 });
-  toast(r.enqueued ? '已加入同步队列，请稍后在「数据管理」查看进度' : '该省份数据已在队列中或已完成');
-};
-
-function renderRecommend(r, q) {
-  const box = $('#r-result');
-  const meta = r.meta;
-  const bing = meta.mode === 'rank';
-  const tierDef = [['chong', '冲'], ['wen', '稳'], ['bao', '保']];
-  const total = (r.counts.chong + r.counts.wen + r.counts.bao);
-  const mm = r.majorMatches || {};
-  box.innerHTML = `
-  <div class="card">
-    <div class="filters" style="align-items:center">
-      <h2 class="h2">推荐结果</h2>
-      <span class="tag">${esc(meta.province)} · ${esc(meta.type)}</span>
-      ${bing
-        ? `<span class="tag">你的位次 <b>${fmt(meta.userRank)}</b></span>`
-        : `<span class="tag">你的分数 <b>${fmt(meta.userScore)}</b></span>
-           <span class="tag">本科省控线 <b>${fmt(meta.baseLine)}</b></span>
-           <span class="tag">你的线差 <b>${meta.userDiff > 0 ? '+' : ''}${meta.userDiff}</b></span>`}
-      <span class="tag">参考年份 ${meta.refYears.join(' / ')}</span>
-      <span class="tag">候选 ${fmt(meta.candidates)}</span>
-      <div class="spacer"></div>
-      <button class="btn sm" id="r-print">打印</button>
-    </div>
-    <div class="hint">
-      共匹配到 <b>${fmt(total)}</b> 个招生单元：冲 ${r.counts.chong} / 稳 ${r.counts.wen} / 保 ${r.counts.bao}；
-      批次范围：<b>${esc(meta.batch)}</b>。
-      定位方式：<b>${bing ? '位次法' : '线差法（分数 − 省控线）'}</b>。
-      ${bing ? '' : '线差法不受试卷难度与省控线波动影响，是分数未知位次时的稳健做法。'}
-    </div>
-    ${meta.notice ? `<div class="hint" style="color:#b45309">ℹ ${esc(meta.notice)}</div>` : ''}
-  </div>
-
-  ${(mm.list && mm.list.length) ? `
-  <div class="card">
-    <h2 class="h2">专业「${esc(mm.keyword)}」近年录取情况 <span class="pill">${mm.list.length}</span></h2>
-    ${mm.note ? `<div class="hint" style="color:#b45309">${esc(mm.note)}</div>` : ''}
-    <div class="tablewrap" style="margin-top:10px"><table>
-      <thead><tr><th>院校</th><th>年份</th><th>专业</th><th>最低分</th><th>线差</th><th>最低位次</th><th>录取概率</th><th>选科要求</th></tr></thead>
-      <tbody>${mm.list.slice(0, 80).map((m) => `<tr>
-        <td>${esc(m.school.name)}</td><td>${m.year}</td><td>${esc(m.major)}</td>
-        <td class="num">${fmt(m.min)}</td><td class="num">${m.diff == null ? '—' : (m.diff > 0 ? '+' : '') + m.diff}</td>
-        <td class="num">${fmt(m.minRank)}</td>
-        <td class="num">${m.probability == null ? '—' : m.probability + '%'}</td>
-        <td>${esc(m.subjectReq || '—')}</td></tr>`).join('')}</tbody></table></div>
-  </div>` : (mm.error ? `<div class="card"><div class="hint" style="color:#b45309">专业匹配未完成：${esc(mm.error)}</div></div>` : '')}
-
-  <div class="tiers">
-    ${tierDef.map(([k, label]) => `
-      <div class="tier ${k}">
-        <div class="tier-head">
-          <h3>${label}（${label === '冲' ? '可以冲一冲' : label === '稳' ? '把握较大' : '保底稳妥'}）</h3>
-          <span class="cnt">${r.counts[k]} 个 · 显示 ${r.tiers[k].length}</span>
-        </div>
-        <div class="tier-body">
-          ${r.tiers[k].length ? r.tiers[k].map((c) => recCard(c, k, bing)).join('') : '<div class="empty" style="padding:20px">暂无匹配结果</div>'}
-        </div>
-      </div>`).join('')}
-  </div>`;
-
-  $('#r-print')?.addEventListener('click', () => window.print());
-  $$('#r-result .star').forEach((b) => b.addEventListener('click', () => {
-    const c = JSON.parse(b.dataset.item);
-    toggleWish(c);
-    b.classList.toggle('on', isWished(c.key));
-  }));
-}
-
-function recCard(c, tier, byRank) {
-  const color = tier === 'chong' ? 'var(--red)' : tier === 'wen' ? 'var(--amber)' : 'var(--green)';
-  const key = `r_${c.school.id}_${c.group}_${tier}`;
-  const item = {
-    key, type: '推荐', school: c.school.name, schoolId: c.school.id,
-    major: c.bestMajor || '',
-    extra: `${c.group || ''} ${c.batch || ''} 概率${c.probability}%${c.bestMajor ? ' · ' + c.bestMajor : ''}`,
-  };
-  const h = c.hist || [];
-  const spark = h.length > 1
-    ? `<svg width="86" height="24" viewBox="0 0 86 24">${(() => {
-        const rs = h.map((x) => x.rank).filter((x) => x > 0);
-        if (rs.length < 2) return '';
-        const lo = Math.min(...rs), hi = Math.max(...rs);
-        const pts = h.map((x, i) => `${(i / (h.length - 1)) * 82 + 2},${22 - ((x.rank - lo) / Math.max(1, hi - lo)) * 20}`).join(' ');
-        return `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.6"/>`;
-      })()}</svg>`
-    : '';
-  const mg = c.majors || [];
-  const majorsHtml = mg.length
-    ? `<div class="majors">
-        <span class="mlabel">推荐专业${c.majorCount > mg.length ? `（${mg.length}/${c.majorCount}）` : ''}</span>
-        ${mg.map((m) => `<span class="mchip${m.hit ? ' hit' : ''}" title="${esc(m.major)}${m.min ? ' · 最低 ' + m.min + ' 分' : ''}">${esc(m.major)}${m.code ? `<i>${esc(m.code)}</i>` : ''}</span>`).join('')}
-      </div>`
-    : '';
-  return `<div class="rcard">
-    <div class="rl1">
-      <span class="sname">${esc(c.school.name)}</span>
-      ${tierTag(c.school)}
-      <span class="meta">${esc(c.school.province || '')}${c.school.city ? ' · ' + esc(c.school.city) : ''}</span>
-      ${c.majorHit ? '<span class="tag" style="background:#dcfce7;color:#15803d">意向专业命中</span>' : ''}
-      <span class="spacer" style="margin-left:auto"></span>
-      <button class="star ${isWished(key) ? 'on' : ''}" data-item='${esc(JSON.stringify(item))}' title="加入志愿表">☆</button>
-    </div>
-    <div class="row">
-      <span class="kv">录取概率 <b style="color:${color}">${c.probability}%</b></span>
-      ${byRank
-        ? `<span class="kv">基准位次 <b>${fmt(c.baseRank)}</b></span>`
-        : `<span class="kv">基准线差 <b>${c.baseDiff == null ? '—' : (c.baseDiff > 0 ? '+' : '') + c.baseDiff}</b></span>`}
-      <span class="kv">${c.latestYear} 年 <b>${fmt(c.latestMin)}分</b>${c.latestRank ? ' / ' + fmt(c.latestRank) + '位' : ''}</span>
-    </div>
-    <div class="row">
-      <span class="meta">${esc(c.group || '')} ${esc(c.batch || '')} ${c.subjectReq ? '· ' + esc(c.subjectReq) : ''}</span>
-      ${spark}
-    </div>
-    ${majorsHtml}
-    <div class="probbar"><i style="width:${c.probability}%;background:${color}"></i></div>
-    <div class="reasons">${(c.reason || []).slice(0, 4).map((x) => `<span>${esc(x)}</span>`).join('')}</div>
-  </div>`;
-}
-
 /* ---------------- 4. 我的志愿 ---------------- */
 function renderWishlist() {
   const box = $('#w-result');
@@ -512,18 +437,22 @@ function renderWishlist() {
     <tbody>${list.map((x, i) => `<tr>
       <td>${i + 1}</td><td>${esc(x.type)}</td>
       <td><a href="https://www.gaokao.cn/school/${x.schoolId}" target="_blank" rel="noopener">${esc(x.school)}</a></td>
-      <td>${esc(x.year || '')}</td><td>${esc(x.extra || '')}</td>
+      <td>${esc(x.year || '')}</td><td>${esc(x.extra || x.major || '')}</td>
       <td><button class="btn sm danger" data-del="${esc(x.key)}">移除</button></td></tr>`).join('')}
     </tbody></table></div></div>`;
   $$('#w-result [data-del]').forEach((b) => b.addEventListener('click', () => {
-    S.wishlist = S.wishlist.filter((x) => x.key !== b.dataset.del);
-    saveWishlist(); renderWishlist(); toast('已移除');
+    const item = S.wishlist.find((x) => x.key === b.dataset.del);
+    if (item) toggleWish(item);
   }));
 }
 
 function exportWishlist() {
   if (!S.wishlist.length) return toast('志愿表为空');
-  const rows = [['序号', '类型', '院校', '院校ID', '年份', '专业/专业组']];
+  // 导出的纸质/电子结果必须自带数据快照，脱离本工具后仍可判断时效性
+  const snap = S.meta?.dataVersion
+    ? `数据版本 ${S.meta.dataVersion}`
+    : snapshotForExport(null);
+  const rows = [['# 数据快照', snap], ['序号', '类型', '院校', '院校ID', '年份', '专业/专业组']];
   S.wishlist.forEach((x, i) => rows.push([i + 1, x.type, x.school, x.schoolId, x.year || '', x.extra || '']));
   const csv = '\uFEFF' + rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\r\n');
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
@@ -569,17 +498,21 @@ function dataSourceCard(ds) {
       <td class="num">${y.plan_code ? fmt(y.plan_code) : '—'}</td>
       <td class="num">${y.school_code ? fmt(y.school_code) : '—'}</td></tr>`).join('');
 
-  // 省份覆盖：标出最新年份，缺 2026 的灰显
+  // 省份覆盖：逐省展示当年四态，禁止用 has2026 布尔 OR 渲染绿色「有 2026」
   const provRows = (ds.provinces || []).map((p) => {
     const cell = (y) => (y ? `<b>${y}</b>` : '<span class="hint" style="margin:0">—</span>');
+    const chip = (typeof QualityUI !== 'undefined')
+      ? QualityUI.stateChip(p)
+      : (p.has2026 ? '<span class="tag tpub">有 2026</span>' : '<span class="hint" style="margin:0">—</span>');
     return `<tr>
       <td>${esc(p.name)}</td>
       <td>${cell(p.latestRank)}</td>
       <td>${cell(p.latestAdm)}</td>
       <td>${cell(p.latestMajor)}</td>
-      <td>${p.has2026 ? '<span class="tag tpub">有 2026</span>' : '<span class="hint" style="margin:0">—</span>'}</td></tr>`;
+      <td>${chip}</td></tr>`;
   }).join('');
-  const with2026 = (ds.provinces || []).filter((p) => p.has2026).length;
+  const full2026 = (ds.provinces || []).filter((p) => p.has2026).length;
+  const partial2026 = (ds.provinces || []).filter((p) => p.has2026Partial).length;
 
   return `
   <div class="card">
@@ -594,10 +527,11 @@ function dataSourceCard(ds) {
       <div class="stat"><div class="k">随包压缩版</div><div class="v">≈${gz}<span style="font-size:12px"> MB</span></div></div>
       <div class="stat"><div class="k">年份范围</div><div class="v" style="font-size:20px">${yMin}–${yMax}</div></div>
       <div class="stat"><div class="k">院校</div><div class="v">${fmt(ds.schoolCount)}</div></div>
-      <div class="stat"><div class="k">有 2026 的省</div><div class="v">${with2026}<span style="font-size:12px"> / 31</span></div></div>
+      <div class="stat"><div class="k">当年完整省</div><div class="v">${full2026}<span style="font-size:12px"> / 31</span></div></div>
+      <div class="stat"><div class="k">当年部分/抽样省</div><div class="v">${partial2026}<span style="font-size:12px"> / 31</span></div></div>
     </div>
-    <div class="hint">数据来自 <b>GaokaoCompass</b>（2017–2025，31 省）与 <b>gaokao-vault</b>（2026 抓取），
-      已统一为同一套表结构。全部离线可查，不需要联网同步。</div>
+    <div class="hint">数据来自 <b>GaokaoCompass</b>（历史库）与<b>各省官方发布 / 后台补抓</b>（当年增量），
+      已统一为同一套表结构。当年数据仅部分省份、部分表已发布，抽样行标 ◐ 且默认不参与推荐算法。</div>
   </div>
 
   <div class="card">
@@ -612,13 +546,13 @@ function dataSourceCard(ds) {
     <div class="tablewrap" style="margin-top:10px;max-height:420px;overflow-y:auto"><table>
       <thead><tr><th>年份</th><th>一分一段</th><th>院校投档线</th><th>专业录取分</th><th>招生计划</th><th>院校代码</th></tr></thead>
       <tbody>${yearRows}</tbody></table></div>
-    <div class="hint">一分一段与院校投档线覆盖 2017–2025 全部 31 省；专业录取分与招生计划保留近年，用于专业级推荐与代码查询。</div>
+    <div class="hint">不同省份、年份、表的覆盖并不一致，缺口按 ● / ◐ / — / ⓘ 四态如实标注；「年份范围」不代表每省每年每表都有数据。</div>
   </div>
 
   <div class="card">
     <h2 class="h2">省份覆盖（各表最新年份） <span class="pill">${(ds.provinces || []).length} 省</span></h2>
     <div class="tablewrap" style="margin-top:10px;max-height:520px;overflow-y:auto"><table>
-      <thead><tr><th>省份</th><th>一分一段</th><th>投档线</th><th>专业录取分</th><th>2026</th></tr></thead>
+      <thead><tr><th>省份</th><th>一分一段</th><th>投档线</th><th>专业录取分</th><th>当年数据四态</th></tr></thead>
       <tbody>${provRows}</tbody></table></div>
     <div class="hint">想补某省某年缺失数据，可在下方「后台补抓」里按需同步（会并入本地索引，不影响已有数据）。</div>
   </div>`;
@@ -686,33 +620,21 @@ function upstreamCard(up) {
 
 /* ---------------- 事件绑定 ---------------- */
 function bindEvents() {
-  $('#s-school').addEventListener('input', (e) => {
-    clearTimeout(schoolTimer);
-    const v = e.target.value.trim();
-    schoolTimer = setTimeout(() => searchSchoolList(v).catch(() => {}), 260);
-  });
-  $('#s-search').addEventListener('click', runScoreQuery);
-  $('#s-province').addEventListener('change', async () => { await refreshDict('s'); });
-  $('#s-type').addEventListener('change', () => {});
-  $('#s-school').addEventListener('keydown', (e) => { if (e.key === 'Enter') runScoreQuery(); });
-  $('#s-major').addEventListener('keydown', (e) => { if (e.key === 'Enter') runScoreQuery(); });
-
+  // v3：旧「分数线查询」与「智能推荐」页入口已从 DOM 移除，
+  // 其 s-* / r-* 绑定必须一并删除，否则 null.addEventListener 会中断后续全部绑定。
   $('#c-search').addEventListener('click', runCampusSearch);
   $('#c-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') runCampusSearch(); });
 
-  $('#r-province').addEventListener('change', () => refreshDict('r'));
-  $('#r-mode').addEventListener('change', () => {
-    const mode = $('#r-mode').value;
-    $('#r-score-wrap').style.display = mode === 'score' ? '' : 'none';
-    $('#r-rank-wrap').style.display = mode === 'rank' ? '' : 'none';
-  });
-  $('#r-run').addEventListener('click', runRecommend);
-
   $('#w-export').addEventListener('click', exportWishlist);
   $('#w-print').addEventListener('click', () => window.print());
-  $('#w-clear').addEventListener('click', () => {
+  $('#w-clear').addEventListener('click', async () => {
     if (!S.wishlist.length) return;
-    if (confirm('确定清空志愿表？')) { S.wishlist = []; saveWishlist(); renderWishlist(); toast('已清空'); }
+    if (!confirm('确定清空志愿表？')) return;
+    S.wishlist = []; saveWishlist(); renderWishlist(); toast('已清空');
+    if (window.AuthUI?.isAuthenticated()) {
+      try { await api('/wishlist/clear', {}, { method: 'POST' }); }
+      catch (e) { toast('服务端清空失败：' + e.message); }
+    }
   });
 
   $('#d-refresh').addEventListener('click', renderData);
