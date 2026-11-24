@@ -149,7 +149,7 @@ export async function buildPlan(opt) {
   // 同时在候选年份里挑数据最全的那一年（不是简单取最新年）
   const MIN_SPECIAL_ROWS = 200;
   const spYears = specialYears(pid).filter((y) => years.includes(y));
-  // 与 recommend.mjs 同口径：majorsByUnit 以 `${schoolId}#${专业组名}` 为键，
+  // 与投档线同口径：majorsByUnit 以 `${schoolId}#${专业组名}` 为键，
   // 选年须保证专业组名与候选单元对得上，否则专业粒度会静默丢失。
   const unitGroupKeys = new Set();
   for (const [sid, names] of schoolGroupNames) {
@@ -159,7 +159,7 @@ export async function buildPlan(opt) {
   for (const y of spYears) {
     const idx = loadSpecialIndex(pid, y);
     if (!idx || !idx.rows || idx.rows.length < MIN_SPECIAL_ROWS) continue;
-    // 与 recommend.mjs 同口径：按「能通过批次过滤的有效行数」挑年份，
+    // 与投档线同口径：按「能通过批次过滤的有效行数」挑年份，
     // 避免选中批次命名口径不同的旧年份导致专业粒度静默丢失。
     const batchRows = batchFilter
       ? idx.rows.filter((r) => {

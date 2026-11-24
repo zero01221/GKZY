@@ -1,6 +1,6 @@
 /**
  * 数据源适配层：把 SQLite（GaokaoCompass + gaokao-vault 统一数据）适配成
- * 现有推荐引擎需要的「索引」结构，从而无需改动 plan.mjs / recommend.mjs 的核心逻辑。
+ * 志愿参考引擎需要的「索引」结构，从而无需改动 plan.mjs 的核心逻辑。
  *
  * 返回结构与原 JSON 索引完全一致：
  *   { pid, province, year, dict:{type[],batch[],group[],subj[],zslx[]},

@@ -196,7 +196,6 @@ async function check(name, fn) {
   const school = r1.items[0];
   const prov = await (await fetch(`${BASE}/api/score/province?schoolId=104&provinceId=44`)).json();
   const spec = await (await fetch(`${BASE}/api/score/special?schoolId=104&provinceId=44&year=2025`)).json();
-  const rec = await (await fetch(`${BASE}/api/recommend?provinceId=11&type=${encodeURIComponent('综合')}&score=600&limit=12`)).json();
   const plan = await (await fetch(`${BASE}/api/plan?provinceId=11&type=${encodeURIComponent('综合')}&score=600&total=80&strategy=major`)).json();
   const trend = await (await fetch(`${BASE}/api/score/trend?schoolId=104&provinceId=44`)).json();
   const cd = await (await fetch(`${BASE}/api/colleges/detail?school=${encodeURIComponent('清华大学')}`)).json();
@@ -230,23 +229,6 @@ async function check(name, fn) {
 
 
 
-
-  await check('推荐结果含专业代码与命中标记', () => {
-    const all = [...rec.tiers.chong, ...rec.tiers.wen, ...rec.tiers.bao];
-    const coded = all.filter((x) => (x.majors || []).some((m) => m.code));
-    if (!coded.length) throw new Error('没有任何专业代码');
-    const hit = all.filter((x) => x.majorHit);
-    return `${coded.length}/${all.length} 条带专业代码，${hit.length} 条命中意向专业`;
-  });
-
-  // ★ 全量年份回归：北京补回 2017–2022 后，专业选年必须兼顾专业组名兼容性
-  await check('北京推荐：全量年份下专业粒度仍生效', () => {
-    const all = [...rec.tiers.chong, ...rec.tiers.wen, ...rec.tiers.bao];
-    const withMajor = all.filter((x) => (x.majors || []).length);
-    if (!withMajor.length) throw new Error('北京推荐没有带专业候选（专业选年组名不兼容？）');
-    if (!(rec.meta?.majorDataYear > 2000)) throw new Error(`专业数据年份不可追溯，实际 ${rec.meta?.majorDataYear}`);
-    return `${withMajor.length}/${all.length} 条带专业，majorDataYear=${rec.meta.majorDataYear}`;
-  });
 
   await check('北京方案：全量年份下专业粒度仍生效', () => {
     if (!plan.ok) throw new Error(plan.message || '方案生成失败');

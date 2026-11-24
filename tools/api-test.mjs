@@ -82,25 +82,6 @@ async function startServer() {
     check('环境详情', cd.ok && cd.detail.groups.length > 20, `${cd.detail.resp} 份问卷 / ${cd.detail.groups.length} 个问题`);
     check('原文深链', /cn\.colleges\.chat\/universities\//.test(cd.detail.url), cd.detail.url);
 
-    head('F3 · 冲稳保推荐');
-    const recDiff = await j('/api/recommend?provinceId=11&type=' + encodeURIComponent('综合') + '&score=600&limit=15');
-    if (recDiff.ok) {
-      check('线差法模式', recDiff.meta.mode === 'diff', `省控线 ${recDiff.meta.baseLine} / 线差 ${recDiff.meta.userDiff}`);
-      check('三档均有结果', recDiff.counts.chong > 0 && recDiff.counts.wen > 0 && recDiff.counts.bao > 0,
-        `冲${recDiff.counts.chong} 稳${recDiff.counts.wen} 保${recDiff.counts.bao}`);
-      const all = [...recDiff.tiers.chong, ...recDiff.tiers.wen, ...recDiff.tiers.bao];
-      check('默认只看本科批', all.every((c) => (c.batch || '').includes('本科')), all[0]?.batch);
-      check('概率区间合法', all.every((c) => c.probability >= 0 && c.probability <= 100));
-      check('推荐理由非空', all.every((c) => (c.reason || []).length > 0), all[0]?.reason?.join('/'));
-    } else { check('线差法模式', false, recDiff.message); }
-
-    const recRank = await j('/api/recommend?provinceId=11&type=' + encodeURIComponent('综合') + '&rank=10000&limit=9');
-    if (recRank.ok) check('位次法模式', recRank.meta.mode === 'rank', `位次 ${recRank.meta.userRank}`);
-    else check('位次法模式', false, recRank.message);
-
-    const recMajor = await j('/api/recommend?provinceId=11&type=' + encodeURIComponent('综合') + '&score=650&limit=9&major=' + encodeURIComponent('计算机'));
-    check('带专业匹配', recMajor.ok, recMajor.majorMatches ? `${recMajor.majorMatches.list?.length || 0} 条专业记录` : '无');
-
     // ================= 资料库 =================
     head('F4 · 资料库（一分一段表 · 真实数据）');
     const rs = await j('/api/resource/status');
@@ -179,17 +160,7 @@ async function startServer() {
     })).json();
     check('未填 Key 时给出提示', noKey.ok === false && /API Key/.test(noKey.message || ''), noKey.message);
 
-    head('F8 · 智能推荐含专业 + 数据管理数据源');
-    const recM = await j('/api/recommend?provinceId=44&type=' + encodeURIComponent('物理类') + '&score=600&major=' + encodeURIComponent('计算机'));
-    const recAll = [...(recM.tiers?.chong || []), ...(recM.tiers?.wen || []), ...(recM.tiers?.bao || [])];
-    check('推荐结果带专业', recAll.some((x) => (x.majors || []).length > 0),
-      `${recAll.filter((x) => (x.majors || []).length).length}/${recAll.length} 条含专业`);
-    const withCode = recAll.filter((x) => (x.majors || []).some((m) => m.code));
-    check('推荐专业带代码', withCode.length > 0, `${withCode.length} 条含专业代码`);
-    const hit = recAll.filter((x) => x.majorHit);
-    check('意向专业命中标记', hit.length > 0, `${hit.length} 条命中「计算机」`);
-    check('专业数据年份可追溯', recM.meta.majorData === true && recM.meta.majorDataYear > 2000, `${recM.meta.majorDataYear} 年`);
-
+    head('F8 · 数据管理数据源');
     const st = await j('/api/status');
     check('数据管理已切到新数据源', st.dataSource?.kind === 'sqlite',
       st.dataSource?.kind === 'sqlite' ? `SQLite ${Math.round(st.dataSource.bytes / 1024 / 1024)} MB，${st.dataSource.years.min}-${st.dataSource.years.max}` : st.dataSource?.kind);
@@ -435,10 +406,6 @@ async function startServer() {
     check('草稿删除', (await reqJson('/api/drafts/' + dId, { method: 'DELETE' }, AUTH_COOKIE)).body.ok === true);
 
     head('边界与错误处理');
-    const bad = await j('/api/recommend?provinceId=99&type=' + encodeURIComponent('综合') + '&score=600');
-    check('非法省份给出提示', bad.ok === false && !!bad.message, bad.message?.slice(0, 40));
-    const noIndex = await j('/api/recommend?provinceId=54&type=' + encodeURIComponent('理科') + '&score=600');
-    check('缺数据不崩溃', typeof noIndex.ok === 'boolean', noIndex.ok ? '有数据' : noIndex.message?.slice(0, 40));
     const r404 = await fetch(B + '/api/notexist');
     check('未知接口返回 404', r404.status === 404);
     const page = await fetch(B + '/');

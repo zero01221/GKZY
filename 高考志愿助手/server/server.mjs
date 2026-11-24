@@ -19,15 +19,14 @@ import {
 import {
   schoolProvinceScores, schoolSpecialScores, upstreamStatus, apiFetch, PAGE_SIZE,
 } from './upstream.mjs';
-import { recommend } from './recommend.mjs';
-import { enqueue, enqueueMany, startIndexer, indexerStatus, autoBootstrap, coverage, quickIndex } from './indexer.mjs';
+import { enqueue, enqueueMany, startIndexer, indexerStatus, autoBootstrap, coverage } from './indexer.mjs';
 import {
   listRankTables, listImageOnly, getRankTable, realScoreToRank, realRankToScore, availableRank,
   getPlanCodes, getSpecialCodes, schoolNationalCode, schoolAllCodes, resourceStatus,
 } from './resources.mjs';
 import { buildPlan } from './plan.mjs';
 import { skillInfo, chatProxy, EXTRACT_PROMPT } from './ai.mjs';
-import { source as gcsSource, info as gcsInfo, provinceTypes as gcsProvinceTypes, init as gcsInit, dataSource as gcsDataSource, invalidateDataSource } from './gcsource.mjs';
+import { source as gcsSource, info as gcsInfo, provinceTypes as gcsProvinceTypes, init as gcsInit, dataSource as gcsDataSource } from './gcsource.mjs';
 import * as quality from './quality.mjs';
 import * as Auth from './auth.mjs';
 import * as store from './store.mjs';
@@ -498,45 +497,6 @@ async function handleApi(req, res, url, body) {
       }, q, { rankSource: 'estimated' });
     }
     return sendJson(res, { ok: false, message: '需要 score 或 rank' }, 400);
-  }
-
-  // ---- 冲稳保推荐 ----
-  if (p === '/recommend') {
-    const pid = toNum(q.provinceId);
-    const reqArgs = {
-      provinceId: pid, type: q.type || '', score: toNum(q.score),
-      rank: toNum(q.rank) || null, major: q.major || '', batch: q.batch || '',
-      limit: Math.min(toNum(q.limit, 45), 120), year: toNum(q.year) || null,
-    };
-    try {
-      const out = await recommend(reqArgs);
-      return withQuality(res, out, q, {
-        refYears: out.meta?.refYears, rankSource: out.meta?.rankSource,
-      });
-    } catch (e) {
-      // 缺索引时：先做一次「快速抽样建索引」（约 30 页），成功就立刻出结果；同时排队完整同步
-      if ((e.code === 'NO_INDEX' || e.code === 'NO_DATA') && pid) {
-        const y = toNum(q.year) || new Date().getFullYear();
-        if (q.quick !== '0') {
-          try {
-            const qi = await quickIndex(pid, y, 30);
-            if (qi.ok) {
-              const out = await recommend(reqArgs);
-              out.meta.sampled = true;
-              out.meta.notice = `本次结果基于「${new Date().getFullYear()} 年快速抽样数据」（${qi.rows || '已有'} 条），完整数据正在后台补齐，稍后刷新会更准确。`;
-              enqueue(pid, y, 5); startIndexer();
-              invalidateDataSource();   // 抽样结果不得污染覆盖统计（T5）
-              return withQuality(res, out, q, {
-                refYears: out.meta?.refYears, rankSource: out.meta?.rankSource, sampled: true,
-              });
-            }
-          } catch { /* 落到下面返回错误 */ }
-        }
-        enqueue(pid, y, 1);
-        startIndexer();
-      }
-      return sendJson(res, { ok: false, code: e.code || 'ERR', message: e.message }, 200);
-    }
   }
 
   // ---- 大学环境 ----
